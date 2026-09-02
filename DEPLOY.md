@@ -115,22 +115,30 @@ npm run db:seed
 
 CLI · 화면 · API 가 모두 같은 함수를 호출한다. 결과가 갈리지 않는다.
 
-## 5. 크론 확인
+## 5. 크론 (지금은 꺼져 있다)
 
-`vercel.json` 이 10분마다 `/api/cron/worker` 를 친다.
-배포 후 Settings → Cron Jobs 에 등록됐는지 확인한다.
+`vercel.json` 에 크론을 두지 않았다. 워커가 dry-run 으로도 DB 를 갱신해서
+(메시지 기록·스텝 전진·무응답 종결) 켜두면 데모 데이터가 스스로 소진된다.
+
+발송을 실제로 시작할 때 다시 넣는다:
+
+```json
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "crons": [{ "path": "/api/cron/worker", "schedule": "*/10 * * * *" }]
+}
+```
+
+Hobby 플랜은 크론이 하루 1회로 제한된다. 10분 주기는 Pro 이상.
 
 워커 실행 순서: `resetDaily → rampUp → circuitBreaker → inboundSync → sequenceWorker`
 
-수동 확인:
+수동 실행은 언제든 가능하다:
 
 ```bash
-curl -s https://<도메인>/api/cron/worker                                  # 401
 curl -s -H "Authorization: Bearer $CRON_SECRET" https://<도메인>/api/cron/worker
 # {"ok":true,"sequence":{"processed":..,"sent":..,"queued":..,"finished":..}}
 ```
-
-Hobby 플랜은 크론이 하루 1회로 제한된다. 10분 주기를 쓰려면 Pro 가 필요하다.
 
 ## 6. 배포 후 점검
 
@@ -138,7 +146,7 @@ Hobby 플랜은 크론이 하루 1회로 제한된다. 10분 주기를 쓰려면
 - [ ] `/influencers` 첫 렌더가 1초 안에 끝나는가 (LATERAL 조인 1회)
 - [ ] `/u/<발급된토큰>` GET 이 확인 페이지를 띄우는가
 - [ ] 없는 토큰도 200 을 주는가 (열거 방지)
-- [ ] 크론 잡이 Settings 에 보이는가
+- [ ] 크론 잡이 없는가 (지금은 끈 상태가 정상)
 - [ ] `/setup` 이 열리고 상태가 맞게 보이는가
 - [ ] `/api/admin/setup` 을 인증 없이 POST 하면 401 인가
 
