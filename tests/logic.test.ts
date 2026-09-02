@@ -1,92 +1,380 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import fs from "node:fs";
-import path from "node:path";
 
-// 테스트는 별도 DB 파일을 쓴다. 개발용 data/app.db 를 건드리지 않는다.
-const TEST_DB = path.join(process.cwd(), "data", "test.db");
-for (const s of ["", "-wal", "-shm"]) fs.rmSync(TEST_DB + s, { force: true });
-process.env.GONG_DB = TEST_DB;
-process.env.GONG_TODAY = "2026-09-01";
+const H = await import("../src/lib/handle.ts");
+const P = await import("../src/lib/parse.ts");
+const D = await import("../src/lib/dedupe.ts");
+const T = await import("../src/lib/template.ts");
+const S = await import("../src/lib/score.ts");
+const ST = await import("../src/lib/states.ts");
+const G = await import("../src/lib/policy-gate.ts");
+const { parseCsv, toObjects } = await import("../src/lib/csv.ts");
+const { dealStatus, dday, occupiesSlot } = await import("../src/lib/deals.ts");
 
-const { normHandle, cleanHandle, handleSimilarity, igUrl } = await import("../src/lib/handle.ts");
-const { parseCsv, toObjects, parseFollowers, parseRelativeTime } = await import("../src/lib/csv.ts");
-const { dealStatus, dday } = await import("../src/lib/deals.ts");
-const { diffDays, addDays, dayLabel } = await import("../src/lib/clock.ts");
+// ---------- 핸들 ----------
 
-test("핸들 정규화 — 구두점과 대소문자를 지운다", () => {
-  assert.equal(normHandle("@Sooyeon.Living"), "sooyeonliving");
-  assert.equal(normHandle("sooyeon_living"), "sooyeonliving");
-  assert.equal(normHandle("https://www.instagram.com/mom_dailylog/"), "momdailylog");
-  assert.equal(normHandle("  @haru.trip?utm=1 "), "harutrip");
-  assert.equal(normHandle(""), "");
+test("핸들 정규화 — URL · @ · 대소문자를 벗긴다", () => {
+  assert.equal(H.normalizeHandle("@Sooyeon.Living"), "sooyeon.living");
+  assert.equal(H.normalizeHandle("https://www.instagram.com/mom_dailylog/"), "mom_dailylog");
+  assert.equal(H.normalizeHandle("  @haru.trip?utm=1 "), "haru.trip");
+  assert.equal(H.normalizeHandle(""), null);
+  // 인스타 핸들 규칙에 맞지 않으면 받지 않는다
+  assert.equal(H.normalizeHandle("한글핸들"), null);
+  assert.equal(H.normalizeHandle("a".repeat(31)), null);
 });
 
-test("표시용 핸들은 원 표기를 보존한다", () => {
-  assert.equal(cleanHandle("@sooyeon.living"), "sooyeon.living");
-  assert.equal(igUrl("@sooyeon.living"), "https://www.instagram.com/sooyeon.living");
+test("비교 키는 구분자를 지운다 — 정규화와는 다른 용도다", () => {
+  assert.equal(H.comparisonKey("@sooyeon.living"), "sooyeonliving");
+  assert.equal(H.comparisonKey("sooyeon_living"), "sooyeonliving");
+  assert.notEqual(H.normalizeHandle("sooyeon.living"), H.normalizeHandle("sooyeon_living"));
 });
 
-test("핸들 유사도 — 구두점 차이만 있으면 동일로 본다", () => {
-  assert.equal(handleSimilarity("livingnote_k", "livingnote.k"), 1);
-  assert.ok(handleSimilarity("mom_dailylog", "momdailylog") === 1);
-  assert.ok(handleSimilarity("haru.trip", "haru_trip_official") < 0.95);
-  assert.ok(handleSimilarity("nara_home", "beauty_log") < 0.5);
+test("맘캘 슬러그는 . 과 _ 를 복원할 수 없다 — 후보만 만들고 경고한다", () => {
+  const cands = H.slugCandidates("de-elisa-shop");
+  assert.ok(cands.includes("de.elisa.shop"));
+  assert.ok(cands.includes("de_elisa_shop"));
+  assert.ok(cands.includes("de_elisa.shop"));
+  assert.ok(cands.length >= 4, "구분자 조합이 모두 후보여야 한다");
+  assert.match(H.slugWarning("de-elisa-shop")!, /매칭 키로 지정/);
+  assert.equal(H.slugWarning("jinnykitchen"), null);
 });
 
-test("CSV 파서 — 따옴표 안의 쉼표와 개행", () => {
-  const rows = parseCsv('a,b\n"1,000","줄1\n줄2"\n');
-  assert.deepEqual(rows, [
-    ["a", "b"],
-    ["1,000", "줄1\n줄2"],
-  ]);
-  const { headers, records } = toObjects(rows);
-  assert.deepEqual(headers, ["a", "b"]);
-  assert.equal(records[0].a, "1,000");
-});
-
-test("CSV 파서 — 이스케이프된 따옴표와 BOM", () => {
-  const rows = parseCsv('﻿name\n"그는 ""안녕"" 이라 했다"');
-  assert.equal(rows[0][0], "name");
-  assert.equal(rows[1][0], '그는 "안녕" 이라 했다');
-});
+// ---------- 파서 ----------
 
 test("팔로워 파싱 — 만 단위와 반올림 오차", () => {
-  assert.deepEqual(parseFollowers("10.8만"), { value: 108000, precision: 500 });
-  assert.deepEqual(parseFollowers("11만"), { value: 110000, precision: 5000 });
-  assert.deepEqual(parseFollowers("1,204"), { value: 1204, precision: 0 });
-  assert.deepEqual(parseFollowers(""), { value: null, precision: 0 });
-  assert.equal(parseFollowers("62K").value, 62000);
+  assert.deepEqual(P.parseFollowers("10.8만"), { value: 108000, precision: 500 });
+  assert.deepEqual(P.parseFollowers("11만"), { value: 110000, precision: 5000 });
+  assert.deepEqual(P.parseFollowers("팔로워10.8만"), { value: 108000, precision: 500 });
+  assert.equal(P.parseFollowers("1,204")!.value, 1204);
+  assert.equal(P.parseFollowers(""), null);
 });
 
-test("상대시간 파싱", () => {
+test('건수 파서 — "30일 35건" 에서 35 를 뽑는다 (30은 기간)', () => {
+  assert.equal(P.parseCount("30일 35건"), 35);
+  assert.equal(P.parseCount("90일 14건"), 14);
+  assert.equal(P.parseCount("5"), 5);
+  assert.equal(P.parseCount(""), null);
+});
+
+test("평균 간격 · 경과일 파싱", () => {
+  assert.equal(P.parseFirstInt("평균 11일 간격"), 11);
+  assert.equal(P.parseFirstInt("마지막 공구 19일 전"), 19);
+});
+
+test("기간 파싱 — 뒤쪽 연도를 앞쪽에서 물려받는다", () => {
+  assert.deepEqual(P.parsePeriod("2026-09-01 ~ 09-07"), ["2026-09-01", "2026-09-07"]);
+  assert.deepEqual(P.parsePeriod("2026-09-01 ~ 2026-09-07"), ["2026-09-01", "2026-09-07"]);
+  assert.deepEqual(P.parsePeriod("상시"), [null, null]);
+});
+
+test("카테고리 점유율 파싱", () => {
+  assert.deepEqual(P.parseCategoryShare("리빙 61%, 인테리어 22%"), { 리빙: 61, 인테리어: 22 });
+  assert.deepEqual(P.parseCategoryShare('{"리빙":61}'), { 리빙: 61 });
+  assert.deepEqual(P.parseCategoryShare(""), {});
+});
+
+test("상대시간 · 가격 파싱", () => {
   const now = new Date("2026-09-01T12:00:00Z");
-  assert.equal(parseRelativeTime("약 1시간 전", now), "2026-09-01 11:00:00");
-  assert.equal(parseRelativeTime("3일 전", now), "2026-08-29 12:00:00");
-  assert.equal(parseRelativeTime("알 수 없음", now), null);
+  assert.equal(P.parseRelativeTime("약 1시간 전", now)!.toISOString(), "2026-09-01T11:00:00.000Z");
+  assert.equal(P.parseRelativeTime("방금", now)!.toISOString(), now.toISOString());
+  assert.equal(P.parsePrice("89,000원"), 89000);
 });
 
-test("딜 상태 — 상시 공구는 D-DAY 집계에서 분리된다", () => {
-  const timed = { starts_on: "2026-09-05", ends_on: "2026-09-10", is_always_on: 0 };
-  assert.equal(dealStatus(timed, "2026-09-01"), "soon");
-  assert.equal(dealStatus(timed, "2026-09-07"), "live");
-  assert.equal(dealStatus(timed, "2026-09-11"), "past");
+test("부재중 자동응답 판별 — 답장으로 세면 회신율이 부풀고 시퀀스가 잘못 멈춘다", () => {
+  assert.equal(P.isAutoReply("자동 회신", "휴가 중입니다"), true);
+  assert.equal(P.isAutoReply("Out of Office", null), true);
+  assert.equal(P.isAutoReply("RE: 제안", "네 좋습니다! 진행할게요"), false);
+});
 
+test("복귀일 추출", () => {
+  assert.equal(P.parseReturnDate("9월 8일부터 복귀합니다", new Date("2026-09-01")), "2026-09-08");
+  assert.equal(P.parseReturnDate("2026-09-10 복귀"), "2026-09-10");
+  assert.equal(P.parseReturnDate("연락 주세요"), null);
+});
+
+// ---------- CSV ----------
+
+test("CSV 파서 — 따옴표 안의 쉼표·개행·이스케이프", () => {
+  const rows = parseCsv('a,b\n"1,000","줄1\n줄2"\n');
+  assert.deepEqual(rows, [["a", "b"], ["1,000", "줄1\n줄2"]]);
+  assert.equal(toObjects(rows).records[0].a, "1,000");
+  assert.equal(parseCsv('﻿name\n"그는 ""안녕"" 이라 했다"')[1][0], '그는 "안녕" 이라 했다');
+});
+
+// ---------- 중복 판정 ----------
+
+test("소스 PK 가 같으면 핸들이 달라도 같은 사람 — 핸들 변경 신호", () => {
+  const m = D.scoreMatch(
+    { handle: "joo0.is.happy", platformUserId: "9306", displayName: "주영이네" },
+    { id: "x", handle: "hi.iamjoo0", platform_user_id: "9306", display_name: "주영이네" },
+  );
+  assert.equal(m.score, 1);
+  assert.equal(m.deterministic, true);
+  assert.equal(m.handleChanged, true);
+});
+
+test("구두점만 다르면 병합 후보, 표시명이 다르면 검토로 내려간다", () => {
+  const same = D.scoreMatch(
+    { handle: "livingnote.k", displayName: "리빙노트", followers: 62000 },
+    { id: "x", handle: "livingnote_k", display_name: "리빙노트", followers: 62000 },
+  );
+  assert.ok(same.score >= 0.95, `점수 ${same.score}`);
+  assert.equal(D.decide(same.score, same.deterministic), "merge");
+
+  const dup = D.scoreMatch(
+    { handle: "mom_dailylog", displayName: "엄마의하루", followers: 105000 },
+    { id: "x", handle: "mom_dailylog", display_name: "소소한하루", followers: 108000 },
+  );
+  assert.equal(D.decide(dup.score, dup.deterministic), "review", "핸들이 같아도 표시명이 다르면 사람이 본다");
+  assert.match(dup.evidence, /동명이인/);
+});
+
+test("전혀 다른 핸들은 신규", () => {
+  const m = D.scoreMatch({ handle: "nara_home" }, { id: "x", handle: "beauty_log_h" });
+  assert.equal(D.decide(m.score, m.deterministic), "new");
+});
+
+test("필드 서바이버십 — 소스마다 믿을 필드가 다르다", () => {
+  assert.equal(D.survive("followers", [
+    { source: "ingong", value: 60000 }, { source: "pangpang", value: 62000 },
+  ]), 62000, "팔로워는 공구팡팡");
+  assert.equal(D.survive("avg_interval_days", [
+    { source: "pangpang", value: 12 }, { source: "ingong", value: 9 },
+  ]), 9, "케이던스는 인공");
+  assert.equal(D.survive("is_curated", [
+    { source: "pangpang", value: false }, { source: "momcal", value: true },
+  ]), true, "큐레이션은 맘캘린더");
+  assert.equal(D.survive("followers", [{ source: "pangpang", value: null }]), null);
+});
+
+// ---------- 적합도 ----------
+
+test("적합도 — 팔로워는 점수 축이 아니다", () => {
+  const base = { deals30d: 6, credibility: 80, engagementRate: 0.03, categoryShare: { 리빙: 60 }, reach: "email" as const, emailVerified: true };
+  const small = S.fitScore({ ...base }, { category: "리빙" });
+  const huge = S.fitScore({ ...base }, { category: "리빙" });
+  assert.equal(small.score, huge.score, "팔로워는 입력에 아예 없다");
+  assert.equal(small.breakdown.activity, 40, "30일 6건이면 실적 만점");
+  assert.equal(small.breakdown.category, 20, "완전일치 20");
+  assert.equal(small.breakdown.reach, 15, "이메일 검증 15");
+});
+
+test("적합도 — 진성 팔로워 50% 미만이면 품질 점수 0", () => {
+  const r = S.fitScore(
+    { deals30d: 3, credibility: 42, engagementRate: 0.06, categoryShare: { 리빙: 60 }, reach: "email" },
+    { category: "리빙" },
+  );
+  assert.equal(r.breakdown.quality, 0);
+  assert.match(r.notes.join(" "), /진성 팔로워 42%/);
+});
+
+test("적합도 — 마지막 공구 120일 초과면 실적 절반", () => {
+  const fresh = S.fitScore({ deals30d: 6, daysSinceLast: 10 }, {});
+  const stale = S.fitScore({ deals30d: 6, daysSinceLast: 200 }, {});
+  assert.equal(fresh.breakdown.activity, 40);
+  assert.equal(stale.breakdown.activity, 20);
+  assert.match(stale.notes.join(" "), /50% 감쇠/);
+});
+
+test("적합도 — 브랜드 충돌 30일 이내는 점수와 무관하게 제외", () => {
+  const excl = S.fitScore({ deals30d: 6, brandConflictDays: 12, brandConflictName: "라누보" }, { category: "리빙" });
+  assert.equal(excl.excluded, true);
+  assert.equal(excl.score, 0);
+  assert.match(excl.reason!, /라누보 12일 전/);
+
+  assert.equal(S.fitScore({ deals30d: 6, brandConflictDays: 47 }, {}).breakdown.penalty, -15);
+  assert.equal(S.fitScore({ deals30d: 6, brandConflictDays: 88 }, {}).breakdown.penalty, -5);
+  assert.equal(S.fitScore({ deals30d: 6, brandConflictDays: 120 }, {}).breakdown.penalty, 0);
+});
+
+test("적합도 — 슬롯 3건 이상이면 감점, suppression 이면 즉시 제외", () => {
+  assert.equal(S.fitScore({ deals30d: 3, activeSlots: 3 }, {}).breakdown.penalty, -8);
+  const sup = S.fitScore({ deals30d: 6, suppressed: true }, {});
+  assert.equal(sup.excluded, true);
+  assert.equal(sup.reason, "suppression 등재");
+});
+
+test("카테고리 — 인접은 부분 인정", () => {
+  const direct = S.fitScore({ categoryShare: { 리빙: 40 } }, { category: "리빙" });
+  const adj = S.fitScore({ categoryShare: { 인테리어: 40 } }, { category: "리빙" });
+  const none = S.fitScore({ categoryShare: { 뷰티: 40 } }, { category: "리빙" });
+  assert.equal(direct.breakdown.category, 20);
+  assert.equal(adj.breakdown.category, 12);
+  assert.equal(none.breakdown.category, 0);
+});
+
+test("타이밍 — 0.8~2.2 배가 적기", () => {
+  assert.equal(S.timing({ avgIntervalDays: 10, daysSinceLast: 10 }).ready, true);
+  assert.equal(S.timing({ avgIntervalDays: 10, daysSinceLast: 8 }).ready, true);
+  assert.equal(S.timing({ avgIntervalDays: 10, daysSinceLast: 5 }).ready, false);
+  assert.equal(S.timing({ avgIntervalDays: 10, daysSinceLast: 5 }).daysToWait, 3);
+  assert.match(S.timing({ avgIntervalDays: 10, daysSinceLast: 30 }).label, /휴면/);
+  assert.equal(S.timing({ avgIntervalDays: null, daysSinceLast: 5 }).ready, false);
+});
+
+test("티어는 분류 축", () => {
+  assert.equal(S.tierOf(5000), "nano");
+  assert.equal(S.tierOf(62000), "micro");
+  assert.equal(S.tierOf(200000), "mid");
+  assert.equal(S.tierOf(900000), "macro");
+  assert.equal(S.tierOf(62000, true), "agency");
+});
+
+// ---------- 상태 3축 ----------
+
+test("자동화는 종결 상태에서 되돌아가지 않는다", () => {
+  assert.equal(ST.canTransition(ST.ENGINE.IN_SEQUENCE, ST.ENGINE.REPLIED), true);
+  assert.equal(ST.canTransition(ST.ENGINE.REPLIED, ST.ENGINE.IN_SEQUENCE), false);
+  assert.equal(ST.canTransition(ST.ENGINE.REPLIED, ST.ENGINE.IN_SEQUENCE, { manual: true }), true);
+  assert.equal(ST.isTerminal(ST.ENGINE.OPTED_OUT), true);
+  assert.equal(ST.isLive(ST.ENGINE.PAUSED_OOO), true);
+});
+
+test("회신 분류의 부수효과", () => {
+  assert.deepEqual(ST.interestEffects(ST.INTEREST.SCHEDULED), { stage: "agreed", issueToken: true });
+  assert.equal(ST.interestEffects(ST.INTEREST.LATER).requeueAfterDays, 180, "지금은 아님은 이탈이 아니다");
+  assert.equal(ST.interestEffects(ST.INTEREST.DO_NOT_CONTACT).suppress?.permanent, true);
+  assert.equal(ST.interestEffects(ST.INTEREST.OOO).engineState, ST.ENGINE.PAUSED_OOO);
+  assert.equal(ST.interestEffects(ST.INTEREST.WRONG_CONTACT).needsNewContact, true);
+});
+
+// ---------- 템플릿 ----------
+
+const POLICY = { requires_ad_label: true, requires_optout: true };
+const SENDER = {
+  orgName: "Dinostudio (주)", address: "partner@dinostudio.kr", phone: "02-000-0000",
+  postalAddress: "서울시 성동구", unsubUrl: "https://x.kr/u/abc", unsubMailto: "unsub@dinostudio.kr",
+};
+
+test("(광고) 표기와 수신거부는 렌더러가 붙인다 — 템플릿에서 지울 수 없다", () => {
+  const r = T.render({ subject: "{{name}}님 제안", body: "본문", is_ad_content: true }, { name: "리빙노트" }, POLICY, SENDER);
+  assert.ok(r.subject!.startsWith("(광고) "));
+  assert.match(r.body, /수신을 원하지 않으시면/);
+  assert.equal(r.headers["List-Unsubscribe-Post"], "List-Unsubscribe=One-Click");
+});
+
+test("광고 표기 변칙은 렌더러가 거부한다", () => {
+  assert.throws(() => T.render({ body: "(광/고) 제안", is_ad_content: true }, {}, POLICY, SENDER), /변칙/);
+  assert.throws(() => T.render({ body: "[AD] 제안", is_ad_content: true }, {}, POLICY, SENDER), /변칙/);
+  assert.equal(T.hasBannedAdLabel("(광고) 정상"), false);
+});
+
+test("치환되지 않은 변수는 경고로 남는다", () => {
+  const r = T.render({ body: "{{name}}님 {{unknown}}", is_ad_content: false }, { name: "A" }, null, SENDER);
+  assert.match(r.warnings.join(" "), /unknown/);
+});
+
+test("spintax 는 수신자마다 다른 문장을 만든다", () => {
+  const first = T.spin("{{RANDOM|안녕하세요|반갑습니다}}!", () => 0);
+  const second = T.spin("{{RANDOM|안녕하세요|반갑습니다}}!", () => 0.9);
+  assert.equal(first, "안녕하세요!");
+  assert.equal(second, "반갑습니다!");
+});
+
+// ---------- 게이트 ----------
+
+const EMAIL_POLICY = {
+  channel: "email", allows_cold: true, automation_mode: "auto" as const, night_block: false,
+  night_from_hour: 21, night_to_hour: 8, requires_ad_label: true, requires_optout: true,
+  default_daily_cap: 75, cooldown_days: 90,
+};
+const DM_POLICY = { ...EMAIL_POLICY, channel: "instagram_dm", allows_cold: false, automation_mode: "manual_task" as const, night_block: true, requires_ad_label: false, requires_optout: false };
+const OK_CTX = {
+  channel: "email", policy: EMAIL_POLICY,
+  contact: { value_norm: "a@b.com", consent_status: "implied_public", channel: "email" },
+  creator: { id: "c1" }, handle: "living_note", suppressions: [],
+  sender: { id: "s1", identifier: "partner@", sent_today: 10, current_cap: 75, paused_until: null },
+  lastContactAt: null, template: { is_ad_content: true },
+  rendered: { subject: "(광고) 제안", body: "본문", headers: { "List-Unsubscribe": "<x>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" } },
+  breakers: [], now: new Date("2026-09-01T05:00:00Z"),
+};
+
+test("게이트 — 정상 조건은 8단계를 모두 통과한다", () => {
+  const r = G.evaluate(OK_CTX);
+  assert.equal(r.ok, true, r.blocked?.detail);
+  assert.ok(r.passed.length >= 8, `통과 ${r.passed.length}단계`);
+});
+
+test("게이트 — suppression 조회에 실패해도 차단한다 (fail-closed)", () => {
+  const r = G.evaluate({ ...OK_CTX, suppressions: null });
+  assert.equal(r.ok, false);
+  assert.equal(r.blocked!.check, "suppression");
+  assert.match(r.blocked!.detail, /조회 실패/);
+});
+
+test("게이트 — 수신거부 등재자는 막힌다", () => {
+  const r = G.evaluate({
+    ...OK_CTX,
+    suppressions: [{ identifier_type: "ig_handle", identifier_val: "living_note", channels: [], reason: "dnc_request" }],
+  });
+  assert.equal(r.blocked!.check, "suppression");
+});
+
+test("게이트 — 도메인 차단도 잡는다", () => {
+  const r = G.evaluate({
+    ...OK_CTX,
+    suppressions: [{ identifier_type: "email_domain", identifier_val: "b.com", channels: [], reason: "unsubscribe" }],
+  });
+  assert.equal(r.blocked!.check, "suppression");
+});
+
+test("게이트 — 콜드 불가 채널은 자동 발송으로 통과할 수 없다", () => {
+  const r = G.evaluate({ ...OK_CTX, channel: "instagram_dm", policy: DM_POLICY, mode: "auto" });
+  assert.equal(r.ok, false);
+  assert.equal(r.blocked!.check, "channel_cold");
+  // 작업 큐 경로로는 통과한다 — 큐가 존재하는 이유다
+  const manual = G.evaluate({ ...OK_CTX, channel: "instagram_dm", policy: DM_POLICY, mode: "manual" });
+  assert.equal(manual.ok, true, manual.blocked?.detail);
+});
+
+test("게이트 — 발신 계정 상한과 쿨다운", () => {
+  const capped = G.evaluate({ ...OK_CTX, sender: { ...OK_CTX.sender, sent_today: 75, current_cap: 75 } });
+  assert.equal(capped.blocked!.check, "sender_cap");
+
+  const cooled = G.evaluate({ ...OK_CTX, lastContactAt: "2026-08-20" });
+  assert.equal(cooled.blocked!.check, "cooldown");
+  assert.match(cooled.blocked!.detail, /쿨다운 90일/);
+});
+
+test("게이트 — (광고) 표기와 수신거부 헤더가 없으면 막힌다", () => {
+  const noAd = G.evaluate({ ...OK_CTX, rendered: { ...OK_CTX.rendered, subject: "제안드립니다" } });
+  assert.equal(noAd.blocked!.check, "ad_label");
+
+  const noUnsub = G.evaluate({ ...OK_CTX, rendered: { ...OK_CTX.rendered, headers: {} } });
+  assert.equal(noUnsub.blocked!.check, "unsubscribe");
+});
+
+test("게이트 — 서킷브레이커가 최우선으로 막는다", () => {
+  const r = G.evaluate({ ...OK_CTX, breakers: [{ metric: "spam_rate", is_tripped: true, action: "halt_all_sending" }] });
+  assert.equal(r.blocked!.check, "circuit_breaker");
+});
+
+test("야간 차단은 KST 기준이고 이메일은 대상이 아니다", () => {
+  // 2026-09-01T13:00Z = 22시 KST
+  const night = new Date("2026-09-01T13:00:00Z");
+  assert.equal(G.hourInKST(night), 22);
+  const dm = G.evaluate({ ...OK_CTX, channel: "instagram_dm", policy: { ...DM_POLICY, automation_mode: "auto" }, mode: "auto", now: night });
+  assert.ok(["channel_cold", "consent", "night_window"].includes(dm.blocked!.check));
+  const email = G.evaluate({ ...OK_CTX, now: night });
+  assert.equal(email.ok, true, "이메일은 야간 제한 대상이 아니다");
+});
+
+test("업무시간 슬롯 — 주말과 야간은 다음 평일 09시로 밀린다", () => {
+  const sat = new Date("2026-09-05T02:00:00Z"); // 토 11시 KST
+  const slot = G.nextBusinessSlot(sat);
+  assert.equal(G.inBusinessWindow(slot), true);
+});
+
+// ---------- 딜 상태 ----------
+
+test("상시 공구는 D-DAY 집계와 슬롯 계산에서 빠진다", () => {
   const always = { starts_on: null, ends_on: null, is_always_on: 1 };
   assert.equal(dealStatus(always, "2026-09-01"), "always");
   assert.equal(dday(always, "2026-09-01").label, "상시");
-});
+  assert.equal(occupiesSlot(always, "2026-09-01"), false);
 
-test("D-DAY — 마감 당일은 '오늘 마감'", () => {
-  const d = { starts_on: "2026-09-01", ends_on: "2026-09-07", is_always_on: 0 };
-  assert.equal(dday(d, "2026-09-07").label, "오늘 마감");
-  assert.equal(dday(d, "2026-09-07").kind, "k-stop");
-  assert.equal(dday(d, "2026-09-04").label, "D-3");
-  assert.equal(dday({ ...d, starts_on: "2026-09-05" }, "2026-09-01").label, "D-4");
-});
-
-test("날짜 헬퍼", () => {
-  assert.equal(diffDays("2026-09-01", "2026-08-25"), 7);
-  assert.equal(addDays("2026-08-31", 1), "2026-09-01");
-  assert.equal(dayLabel("2026-09-01"), "09-01 (화)");
+  const live = { starts_on: "2026-09-01", ends_on: "2026-09-07", is_always_on: 0 };
+  assert.equal(occupiesSlot(live, "2026-09-03"), true);
+  assert.equal(dday(live, "2026-09-07").label, "오늘 마감");
+  assert.equal(dday(live, "2026-09-04").label, "D-3");
 });

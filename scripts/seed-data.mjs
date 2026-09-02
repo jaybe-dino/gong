@@ -151,34 +151,34 @@ export const EVENTS = [
 ];
 
 export const THREADS = [
-  { key: "gm-t1", who: "mom_dailylog", camp: "가을 홈웨어 공구", cls: "3 일정 확정", assignee: "지은", last: "2026-08-31 15:22", sla: "2026-09-01 15:22",
+  { key: "gm-t1", interest: 3, who: "mom_dailylog", camp: "가을 홈웨어 공구", cls: "3 일정 확정", assignee: "지은", last: "2026-08-31 15:22", sla: "2026-09-01 15:22",
     msgs: [
       { d: "out", w: "지은 (Dinostudio)", t: "2026-08-28 10:12", b: "안녕하세요 소소한하루님, Dinostudio 파트너십 담당 지은입니다.\n\n마그랩 이유식 공구를 인상 깊게 봤습니다. 9월 15일부터 2주간 진행하는 라누보 극세사 홈웨어 공동구매를 함께 하실 수 있을지 여쭙습니다.\n\n· 수수료 18%\n· 샘플 무상 제공, 소재 일체 제공\n· 정산은 판매 종료 후 10일 이내" },
       { d: "in", w: "소소한하루", t: "2026-08-29 09:41", b: "안녕하세요! 관심 있습니다.\n혹시 수수료는 조정 가능할까요? 그리고 샘플은 언제쯤 받아볼 수 있나요?" },
       { d: "out", w: "지은 (Dinostudio)", t: "2026-08-29 10:05", b: "빠른 회신 감사합니다.\n\n20%까지 조정 가능하고, 샘플은 확정 주시면 2일 내 발송됩니다. 9월 8일까지 받아보실 수 있어요." },
       { d: "in", w: "소소한하루", t: "2026-08-31 15:22", b: "네 좋습니다! 9월 15일 오픈으로 진행할게요.\n주소는 DM으로 보내드릴게요." },
     ] },
-  { key: "gm-t2", who: "sooyeon.living", camp: "가을 홈웨어 공구", cls: "2 조건 문의", assignee: "지은", last: "2026-08-31 18:02", sla: "2026-09-01 18:02",
+  { key: "gm-t2", interest: 2, who: "sooyeon.living", camp: "가을 홈웨어 공구", cls: "2 조건 문의", assignee: "지은", last: "2026-08-31 18:02", sla: "2026-09-01 18:02",
     msgs: [
       { d: "out", w: "지은 (Dinostudio)", t: "2026-08-29 11:30", b: "안녕하세요 수연리빙님, Dinostudio 지은입니다.\n라누보 극세사 홈웨어 공동구매 제안드립니다." },
       { d: "in", w: "수연리빙", t: "2026-08-31 18:02", b: "수수료 조건이랑 정산 주기가 어떻게 되나요?\n그리고 저 이번 달에 라누보 차렵이불 공구가 이미 잡혀 있는데 괜찮을까요?" },
     ] },
-  { key: "gm-t3", who: "jinny_kitchen", camp: "주방 리빙 3차", cls: "-1 지금은 아님", assignee: "민수", last: "2026-08-30 10:11", sla: null,
+  { key: "gm-t3", interest: -1, who: "jinny_kitchen", camp: "주방 리빙 3차", cls: "-1 지금은 아님", assignee: "민수", last: "2026-08-30 10:11", sla: null,
     msgs: [
       { d: "out", w: "민수 (Dinostudio)", t: "2026-08-27 14:00", b: "안녕하세요 지니키친님, 알텐바흐 주방 3차 공구 제안드립니다." },
       { d: "in", w: "지니키친", t: "2026-08-30 10:11", b: "지금 9월은 일정이 꽉 차 있어서 어렵습니다.\n10월 중순 이후에 다시 연락 주시면 좋겠습니다." },
     ] },
-  { key: "gm-t4", who: "haru.trip", camp: "가을 홈웨어 공구", cls: "-3 담당자 아님 / 소속사", assignee: "지은", last: "2026-08-30 16:45", sla: null,
+  { key: "gm-t4", interest: -3, who: "haru.trip", camp: "가을 홈웨어 공구", cls: "-3 담당자 아님 / 소속사", assignee: "지은", last: "2026-08-30 16:45", sla: null,
     msgs: [
       { d: "out", w: "지은 (Dinostudio)", t: "2026-08-28 09:20", b: "안녕하세요 하루트립님, 협업 제안드립니다." },
       { d: "in", w: "하루트립", t: "2026-08-30 16:45", b: "모든 협업 문의는 소속사로 부탁드립니다.\ncontact@agency-example.kr 로 연락 주세요." },
     ] },
-  { key: "gm-t5", who: "babyroom_diary", camp: "키즈 시즌오프", cls: "-4 연락 금지", assignee: "민수", last: "2026-08-29 08:02", sla: null,
+  { key: "gm-t5", interest: -4, who: "babyroom_diary", camp: "키즈 시즌오프", cls: "-4 연락 금지", assignee: "민수", last: "2026-08-29 08:02", sla: null,
     msgs: [
       { d: "out", w: "민수 (Dinostudio)", t: "2026-08-26 13:10", b: "안녕하세요, 키즈 시즌오프 공구 제안드립니다." },
       { d: "in", w: "베이비룸다이어리", t: "2026-08-29 08:02", b: "앞으로 연락 주지 않으셨으면 합니다." },
     ] },
-  { key: "gm-t6", who: "simple_daily_k", camp: "가을 홈웨어 공구", cls: null, assignee: null, last: "2026-09-01 06:15", sla: "2026-09-01 18:15",
+  { key: "gm-t6", interest: 0, who: "simple_daily_k", camp: "가을 홈웨어 공구", cls: null, assignee: null, last: "2026-09-01 06:15", sla: "2026-09-01 18:15",
     msgs: [
       { d: "out", w: "지은 (Dinostudio)", t: "2026-08-30 10:00", b: "안녕하세요 심플데일리님, 라누보 홈웨어 공구 제안드립니다." },
       { d: "in", w: "심플데일리", t: "2026-09-01 06:15", b: "자료 좀 더 볼 수 있을까요? 상세페이지랑 예상 단가요." },

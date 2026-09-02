@@ -2,30 +2,30 @@
   "name": "gong-outreach-console",
   "version": "0.1.0",
   "private": true,
-  "description": "아웃리치 콘솔 — 공구 인플루언서 발굴·제안·회신 관리 콘솔",
+  "description": "아웃리치 콘솔 — 공구 인플루언서 발굴 · 제안 발송 · 회신 관리",
   "scripts": {
-    "predev": "node scripts/init-db.mjs",
     "dev": "next dev",
-    "prebuild": "node scripts/init-db.mjs",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint",
     "typecheck": "tsc --noEmit",
-    "db:reset": "node scripts/init-db.mjs --force",
+    "db:setup": "node scripts/setup-db.mjs",
+    "db:seed": "node scripts/seed.mjs",
+    "db:reset": "node scripts/setup-db.mjs --drop && node scripts/seed.mjs --force",
     "test": "node --experimental-strip-types --import ./tests/register.mjs --test tests/logic.test.ts tests/pipeline.test.ts",
+    "test:unit": "node --experimental-strip-types --import ./tests/register.mjs --test tests/logic.test.ts",
     "test:e2e": "next build && node --experimental-strip-types --import ./tests/register.mjs --test tests/e2e.test.ts",
     "test:all": "npm test && npm run test:e2e"
   },
   "dependencies": {
-    "better-sqlite3": "^11.10.0",
     "next": "^15.5.4",
+    "pg": "^8.23.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",
-    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^22.15.0",
+    "@types/pg": "^8.23.1",
     "@types/react": "^19.1.0",
     "@types/react-dom": "^19.1.0",
     "typescript": "^5.8.3"

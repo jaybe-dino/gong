@@ -18,10 +18,13 @@ const SCREENS: [string, string, string][] = [
   ["채널 정책", "채널별 콜드 허용·야간 차단·쿨다운, 발신 계정 상한", "컴플라이언스가 사람의 기억에 의존"],
 ];
 
-export default function PlanPage() {
-  const creators = one<{ n: number }>(`SELECT COUNT(*) AS n FROM creator`)!.n;
-  const brands = one<{ n: number }>(`SELECT COUNT(*) AS n FROM brand`)!.n;
-  const deals = one<{ n: number }>(`SELECT COUNT(*) AS n FROM deal`)!.n;
+export default async function PlanPage() {
+  const [creators, brands, deals, tables] = await Promise.all([
+    one<{ n: string }>(`SELECT count(*) AS n FROM creator`),
+    one<{ n: string }>(`SELECT count(*) AS n FROM brand`),
+    one<{ n: string }>(`SELECT count(*) AS n FROM deal`),
+    one<{ n: string }>(`SELECT count(*) AS n FROM information_schema.tables WHERE table_schema='public' AND table_type='BASE TABLE'`),
+  ]);
 
   return (
     <Shell path="/plan" title="설계 개요" sub="메일링 · 데이터 유입 · 매칭">
@@ -86,16 +89,16 @@ export default function PlanPage() {
             <p>딜 이력이 쌓이면 타깃 추천이 리스트 필터가 아니라 타이밍 추천이 됩니다.</p>
             <ul>
               <li>
-                <b>카테고리 적합</b> — 카테고리 점유율 × 인접 카테고리 가중치
+                <b>공구 실적 40</b> — 최근 30일 건수. 마지막 공구 120일 초과면 50% 감쇠
               </li>
               <li>
-                <b>브랜드 충돌</b> — 30일 이내 제외 / 60일 −15 / 90일 −5
+                <b>참여 품질 25</b> — ER 백분위 × credibility. 진성 50% 미만이면 0
               </li>
               <li>
-                <b>케이던스 타이밍</b> — 경과일 ÷ 평균 간격이 0.8~2.2 면 +14
+                <b>카테고리 20 · 도달 15</b> — 팔로워는 점수 축이 아니라 분류 축입니다
               </li>
               <li>
-                <b>슬롯 여유</b> — 진행중·예정 3건 이상이면 −12
+                <b>브랜드 충돌</b> — 30일 이내 제외 / 60일 −15 / 90일 −5, 진행·예정 3건 이상 −8
               </li>
             </ul>
           </div>
@@ -104,9 +107,7 @@ export default function PlanPage() {
         <Note tone="warn">
           <b>확인 필요.</b> insta-gong 웹에서는 인플루언서 <b>510명</b>만 노출되고 <code className="mono">/brands</code>
           는 404입니다. &quot;딜 34,650건 / 브랜드 8,150개&quot;는 웹에서 재현되지 않아, 앱 화면이나 로그인 뷰의
-          수치인지 확인이 필요합니다. 현재 DB 는 세 소스 합집합 추정치로 채워져 있습니다 — 크리에이터{" "}
-          <b>{creators.toLocaleString("ko-KR")}명</b>, 브랜드 <b>{brands}개</b>, 딜{" "}
-          <b>{deals.toLocaleString("ko-KR")}건</b>.
+          수치인지 확인이 필요합니다. 현재 DB 는 세 소스 합집합 추정치로 채워져 있습니다 — 크리에이터 <b>{Number(creators?.n).toLocaleString("ko-KR")}명</b>, 브랜드 <b>{brands?.n}개</b>, 딜{" "}<b>{Number(deals?.n).toLocaleString("ko-KR")}건</b>.
         </Note>
 
         <Card title="화면 구성" hint="왼쪽 메뉴에서 바로 이동할 수 있습니다">
@@ -142,12 +143,13 @@ export default function PlanPage() {
                 내려가는 데이터는 화면에 그려지는 것뿐입니다.
               </li>
               <li>
-                <b>SQLite (better-sqlite3)</b> — <code className="mono">src/lib/schema.sql</code> 이 전체 스키마입니다.
-                <code className="mono">npm run db:reset</code> 으로 재생성합니다.
+                <b>PostgreSQL</b> — <code className="mono">db/001_schema.sql</code> 한 파일에 스키마
+                {" "}{tables?.n}개 테이블이 다 들어 있습니다. <code className="mono">npm run db:reset</code> 으로 재생성합니다.
               </li>
               <li>
-                <b>적합도 · 정책 엔진</b> — <code className="mono">src/lib/scoring.ts</code>,{" "}
-                <code className="mono">src/lib/policy.ts</code>. 화면이 아니라 이 두 파일이 판정합니다.
+                <b>적합도 · 정책 엔진</b> — <code className="mono">src/lib/score.ts</code>,{" "}
+                <code className="mono">src/lib/policy-gate.ts</code>, <code className="mono">src/lib/states.ts</code>.
+                화면이 아니라 이 세 파일이 판정합니다.
               </li>
               <li>
                 <b>임포터</b> — <code className="mono">src/lib/importer.ts</code>. 실제 CSV 를 올리면 파싱·매핑 추론·중복

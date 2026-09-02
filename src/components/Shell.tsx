@@ -5,7 +5,7 @@ import { one } from "@/lib/db";
 import { krDate, today } from "@/lib/clock";
 
 /** 앱 셸. 사이드바 배지와 발신 계정 사용량은 매 요청마다 DB 에서 읽는다. */
-export default function Shell({
+export default async function Shell({
   path,
   title,
   sub,
@@ -16,13 +16,14 @@ export default function Shell({
   sub?: string;
   children: ReactNode;
 }) {
-  const groups = navGroups();
-  const sender = one<{ identifier: string; sent_today: number; daily_cap: number }>(
-    `SELECT identifier, sent_today, daily_cap FROM sender_account WHERE channel='email' AND status='ok' ORDER BY id LIMIT 1`,
-  );
-  const account = one<{ identifier: string }>(
-    `SELECT identifier FROM sender_account WHERE channel='email' ORDER BY id LIMIT 1`,
-  );
+  const [groups, sender] = await Promise.all([
+    navGroups(),
+    one<{ identifier: string; sent_today: number; current_cap: number }>(
+      `SELECT identifier, sent_today, current_cap FROM sender
+        WHERE channel='email' AND is_active AND (paused_until IS NULL OR paused_until < now())
+        ORDER BY identifier LIMIT 1`,
+    ),
+  ]);
 
   return (
     <div className="app">
@@ -51,9 +52,9 @@ export default function Shell({
         </nav>
         <div className="sidefoot">
           <span className="dot" />
-          {account?.identifier ?? "partner@dinostudio.kr"}
+          {sender?.identifier ?? "partner@dinostudio.kr"}
           <br />
-          <span style={{ color: "var(--ink-3)", fontSize: 11 }}>Google Workspace 연동됨</span>
+          <span style={{ color: "var(--ink-3)", fontSize: 11 }}>Gmail API 연동 · dry-run</span>
         </div>
       </aside>
 
@@ -65,7 +66,7 @@ export default function Shell({
           <span className="demo">샘플 데이터</span>
           {sender && (
             <span className="senderchip">
-              <i /> 오늘 발송 {sender.sent_today} / {sender.daily_cap}
+              <i /> 오늘 발송 {sender.sent_today} / {sender.current_cap}
             </span>
           )}
         </div>

@@ -1,62 +1,74 @@
 /**
  * 인스타 핸들 정규화.
  *
- * 세 소스를 잇는 공통 자연키는 인스타 핸들 하나뿐이라, 매칭 전에 표기 차이를 없앤다.
- * 소문자화하고 `.`, `_`, `-`, 공백을 제거한다. `@` 접두사와 URL 형태도 벗겨낸다.
+ * 세 소스의 공통 자연키는 핸들 하나뿐인데 소스마다 표기가 다르다.
+ *   momcalendar  /s/de-elisa-shop   ← '.' 과 '_' 를 모두 '-' 로 치환 (역변환 불가)
+ *   09pangpang   /account/9306      ← 숫자 ID
+ *   insta-gong   /influencers/{uuid}
  *
- * 주의: 맘캘린더의 슬러그(`de-elisa-shop`)는 `.` 과 `_` 를 모두 `-` 로 치환한 결과라
- * 역변환이 불가능하다. 슬러그는 매칭 키로 쓰지 않고 상세 페이지의 실제 @핸들만 쓴다.
- * 이 함수는 그 규칙을 강제하지 못하므로, 임포터가 슬러그 컬럼을 키로 지정하는 것을 막는다.
+ * 그래서 슬러그는 절대 매칭 키로 쓰지 않는다. 상세 페이지 본문의 실제 @handle 만 쓴다.
  */
-export function normHandle(input: string): string {
-  return String(input ?? "")
-    .trim()
-    .replace(/^https?:\/\/(www\.)?instagram\.com\//i, "")
-    .replace(/[/?#].*$/, "")
-    .replace(/^@/, "")
-    .toLowerCase()
-    .replace(/[._\-\s]/g, "");
+
+export const IG_BASE = "https://www.instagram.com/";
+
+/** 인스타 핸들 규칙: 영소문자/숫자/밑줄/마침표, 1~30자 */
+export const HANDLE_RE = /^[a-z0-9._]{1,30}$/;
+
+export function normalizeHandle(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  let h = String(raw).trim().toLowerCase();
+  h = h.replace(/^(https?:\/\/)?(www\.)?instagram\.com\//, "");
+  h = h.split(/[?#]/)[0];
+  h = h.replace(/\/+$/, "");
+  h = h.replace(/^@/, "");
+  if (!h || !HANDLE_RE.test(h)) return null;
+  return h;
 }
 
-/** 표시용 핸들: @ 와 URL 만 벗기고 원 표기는 보존한다. */
-export function cleanHandle(input: string): string {
-  return String(input ?? "")
-    .trim()
-    .replace(/^https?:\/\/(www\.)?instagram\.com\//i, "")
-    .replace(/[/?#].*$/, "")
-    .replace(/^@/, "");
+export function instagramUrl(handle: string | null | undefined): string | null {
+  const h = normalizeHandle(handle);
+  return h ? IG_BASE + h : null;
 }
 
-export const IG = "https://www.instagram.com/";
-export const igUrl = (handle: string) => IG + cleanHandle(handle);
+/** 화면에서 링크를 만들 때. 정규화에 실패해도 원문을 살려 붙인다. */
+export function igUrl(handle: string): string {
+  return instagramUrl(handle) ?? IG_BASE + String(handle).replace(/^@/, "");
+}
 
 /**
- * 두 핸들의 유사도(0~1). 임포트 중복 검사에 쓴다.
- * 정규화 후 동일하면 1.0, 아니면 정규화된 문자열의 Levenshtein 기반 유사도.
+ * momcalendar 슬러그는 '.'/'_' 정보를 잃는다.
+ * 기존 DB 와 대조하는 후보 생성용으로만 쓰고, 새 레코드 생성 키로는 쓰지 않는다.
  */
-export function handleSimilarity(a: string, b: string): number {
-  const x = normHandle(a);
-  const y = normHandle(b);
-  if (!x || !y) return 0;
-  if (x === y) return 1;
-  const d = levenshtein(x, y);
-  return 1 - d / Math.max(x.length, y.length);
+export function slugCandidates(slug: string | null | undefined): string[] {
+  if (!slug) return [];
+  const s = String(slug).trim().toLowerCase().replace(/\.html?$/, "");
+  const parts = s.split("-");
+  if (parts.length === 1) return HANDLE_RE.test(s) ? [s] : [];
+  const out = new Set<string>();
+  const total = Math.min(1 << (parts.length - 1), 256); // 조합 폭발 방지
+  for (let mask = 0; mask < total; mask++) {
+    let acc = parts[0];
+    for (let i = 1; i < parts.length; i++) {
+      acc += ((mask >> (i - 1)) & 1 ? "_" : ".") + parts[i];
+    }
+    out.add(acc);
+  }
+  out.add(s);
+  out.add(parts.join(""));
+  return [...out].filter((h) => HANDLE_RE.test(h));
 }
 
-export function levenshtein(a: string, b: string): number {
-  const m = a.length;
-  const n = b.length;
-  if (!m) return n;
-  if (!n) return m;
-  let prev = Array.from({ length: n + 1 }, (_, i) => i);
-  const cur = new Array<number>(n + 1);
-  for (let i = 1; i <= m; i++) {
-    cur[0] = i;
-    for (let j = 1; j <= n; j++) {
-      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
-      cur[j] = Math.min(cur[j - 1] + 1, prev[j] + 1, prev[j - 1] + cost);
-    }
-    prev = cur.slice();
-  }
-  return prev[n];
+/** 슬러그만 있고 실제 핸들이 없을 때 임포터가 남기는 경고 */
+export function slugWarning(slug: string | null | undefined): string | null {
+  if (!slug || !String(slug).includes("-")) return null;
+  return (
+    `슬러그 '${slug}' 는 '.' 과 '_' 를 구분할 수 없습니다. ` +
+    `상세 페이지의 실제 @핸들 컬럼을 매칭 키로 지정하세요.`
+  );
+}
+
+/** dedupe 비교용: 구분자를 제거한 비교 키 */
+export function comparisonKey(handle: string | null | undefined): string | null {
+  const h = normalizeHandle(handle);
+  return h ? h.replace(/[._]/g, "") : null;
 }

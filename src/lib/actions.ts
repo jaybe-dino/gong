@@ -2,251 +2,329 @@
 
 import { revalidatePath } from "next/cache";
 import { redirect } from "next/navigation";
-import { all, db, one, run } from "./db";
-import { today } from "./clock";
-import { invalidateFitCache } from "./fit-cache";
-import { analyze, applyBatch, saveBatch, SOURCES, type SourceKey } from "./importer";
-import { buildSegment, DEFAULT_SEGMENT, runGate } from "./policy";
+import { all, one, run, tx } from "./db";
+import { nextBusinessSlot } from "./policy-gate";
+import { evaluateCandidate, loadCampaignInfo, loadGateInputs, loadSendCandidates } from "./outreach";
+import { interestEffects, INTEREST, ENGINE } from "./states";
+import { parseReturnDate } from "./parse";
+import { analyzeCsv, commitBatch, SOURCES, type SourceKey } from "./importer";
 
-function nowStamp() {
-  return new Date().toISOString().slice(0, 16).replace("T", " ");
+const JAY = "00000000-0000-0000-0000-0000000000aa";
+
+async function audit(entity: string, entityId: string, action: string, reason?: string, after?: unknown) {
+  await run(
+    `INSERT INTO audit_log (actor_id, actor_kind, entity, entity_id, action, after, reason)
+     VALUES ($1,'user',$2,$3,$4,$5,$6)`,
+    [JAY, entity, entityId, action, after ? JSON.stringify(after) : null, reason ?? null],
+  );
 }
 
-/** 작업 큐 한 건 완료. 발신 계정 사용량을 올리고 발송 기록을 남긴다. */
+/** 작업 큐 한 건 완료. 발신 계정 사용량을 올리고 메시지 기록을 남긴다. */
 export async function completeTask(formData: FormData) {
-  const id = Number(formData.get("id"));
-  const task = one<{ id: number; kind: string; creator_id: number; campaign_id: number | null; sender_id: number | null; status: string }>(
-    `SELECT id, kind, creator_id, campaign_id, sender_id, status FROM task WHERE id = ?`,
-    [id],
-  );
-  if (!task || task.status !== "pending") return;
+  const id = String(formData.get("id") ?? "");
+  if (!id) return;
 
-  db().transaction(() => {
-    run(`UPDATE task SET status='done', done_at=? WHERE id=?`, [nowStamp(), id]);
-    if (task.sender_id) {
-      run(`UPDATE sender_account SET sent_today = sent_today + 1 WHERE id = ? AND status != 'suspended'`, [task.sender_id]);
-    }
-    if (task.kind !== "reply_check") {
-      run(`INSERT INTO outreach_log (creator_id, campaign_id, channel, sent_at, result) VALUES (?,?,?,?, 'sent')`, [
-        task.creator_id,
-        task.campaign_id,
-        task.kind === "ig_dm" ? "ig_dm" : "inpock",
-      nowStamp()]);
-    }
-  })();
+  await tx(async (c) => {
+    const t = (
+      await c.query(
+        `SELECT t.*, cm.creator_id FROM outreach_task t
+           JOIN campaign_member cm ON cm.id = t.campaign_member_id
+          WHERE t.id=$1 AND t.state IN ('queued','claimed') FOR UPDATE`,
+        [id],
+      )
+    ).rows[0];
+    if (!t) return;
 
+    await c.query(`UPDATE outreach_task SET state='sent', completed_at=now(), assigned_to=$2 WHERE id=$1`, [id, JAY]);
+    if (t.sender_id) {
+      await c.query(
+        `UPDATE sender SET sent_today = CASE WHEN sent_date = CURRENT_DATE THEN sent_today + 1 ELSE 1 END,
+                           sent_date = CURRENT_DATE
+          WHERE id=$1 AND (paused_until IS NULL OR paused_until < now())`,
+        [t.sender_id],
+      );
+    }
+    await c.query(
+      `INSERT INTO message (campaign_member_id, sender_id, channel, direction, from_name, body, sent_at, status)
+       VALUES ($1,$2,$3,'out','담당자 수동 발송',$4, now(), 'sent')`,
+      [t.campaign_member_id, t.sender_id, t.channel, t.rendered_body],
+    );
+    await c.query(
+      `UPDATE campaign_member SET last_sent_at=now(),
+              first_sent_at = COALESCE(first_sent_at, now())
+        WHERE id=$1`,
+      [t.campaign_member_id],
+    );
+  });
+
+  await audit("outreach_task", id, "complete");
   revalidatePath("/queue");
   revalidatePath("/dashboard");
 }
 
-/** 액션 블록 신고 — 계정을 24시간 정지시키고 배급된 잔여 작업을 회수한다. */
+/** 액션 블록 신고 — 계정을 24시간 정지하고 배급된 잔여 작업을 회수한다. */
 export async function reportBlock(formData: FormData) {
-  const senderId = Number(formData.get("senderId"));
-  db().transaction(() => {
-    run(`UPDATE sender_account SET status='suspended', paused_until=? WHERE id=?`, [`${today()} 23:59`, senderId]);
-    run(`UPDATE task SET sender_id = NULL WHERE sender_id = ? AND status='pending'`, [senderId]);
-    run(`UPDATE circuit_metric SET value = value + 1 WHERE key='block'`);
-  })();
+  const senderId = String(formData.get("senderId") ?? "");
+  if (!senderId) return;
+  await tx(async (c) => {
+    await c.query(
+      `UPDATE sender SET paused_until = now() + interval '24 hours', pause_reason='액션 블록 신고' WHERE id=$1`,
+      [senderId],
+    );
+    await c.query(`UPDATE outreach_task SET sender_id=NULL WHERE sender_id=$1 AND state IN ('queued','claimed')`, [senderId]);
+    await c.query(
+      `UPDATE circuit_breaker SET current_value = COALESCE(current_value,0) + 1,
+              is_tripped = true, tripped_at = now() WHERE metric='ig_action_block'`,
+    );
+  });
+  await audit("sender", senderId, "pause", "액션 블록 신고");
   revalidatePath("/queue");
   revalidatePath("/policy");
 }
 
-const REQUEUE_DAYS = 180;
-
 /**
- * 회신 분류.
- * -4(연락 금지)는 수신거부 목록에 즉시 등록한다. 이건 되돌릴 수 없다.
+ * 회신 분류 + 부수효과.
+ * 분류가 무엇을 일으키는지는 states.interestEffects 한 곳에만 있다.
  */
 export async function classifyThread(formData: FormData) {
-  const threadId = Number(formData.get("threadId"));
-  const value = String(formData.get("classification") ?? "");
-  if (!value) return;
+  const memberId = String(formData.get("memberId") ?? "");
+  const interest = Number(formData.get("interest"));
+  if (!memberId || Number.isNaN(interest)) return;
 
-  const t = one<{ creator_id: number; campaign_id: number | null }>(
-    `SELECT creator_id, campaign_id FROM thread WHERE id = ?`,
-    [threadId],
-  );
-  if (!t) return;
+  const eff = interestEffects(interest);
 
-  const code = value.split(" ")[0];
-  db().transaction(() => {
-    run(`UPDATE thread SET classification = ? WHERE id = ?`, [value, threadId]);
+  await tx(async (c) => {
+    const m = (
+      await c.query(
+        `SELECT cm.*, sa.handle FROM campaign_member cm
+           JOIN social_account sa ON sa.creator_id = cm.creator_id
+          WHERE cm.id=$1 FOR UPDATE`,
+        [memberId],
+      )
+    ).rows[0];
+    if (!m) return;
 
-    if (code === "-4") {
-      const handle = one<{ handle: string }>(`SELECT handle FROM social_account WHERE creator_id=? AND is_primary=1`, [t.creator_id]);
-      if (handle) {
-        run(`INSERT OR IGNORE INTO suppression (identifier,kind,reason,scope,created_at) VALUES (?, 'handle', '연락 금지 요청', 'all', ?)`, [
-          `@${handle.handle}`,
-          today(),
-        ]);
-      }
-      for (const cp of all<{ value: string }>(`SELECT value FROM contact_point WHERE creator_id=? AND kind='email'`, [t.creator_id])) {
-        run(`INSERT OR IGNORE INTO suppression (identifier,kind,reason,scope,created_at) VALUES (?, 'email', '연락 금지 요청', 'all', ?)`, [
-          cp.value,
-          today(),
-        ]);
-      }
-      if (t.campaign_id) {
-        run(`UPDATE campaign_target SET stage='dropped', updated_at=? WHERE campaign_id=? AND creator_id=?`, [today(), t.campaign_id, t.creator_id]);
-      }
-    } else if (code === "3" && t.campaign_id) {
-      run(`UPDATE campaign_target SET stage='confirmed', updated_at=? WHERE campaign_id=? AND creator_id=?`, [today(), t.campaign_id, t.creator_id]);
-    } else if (code === "2" && t.campaign_id) {
-      run(`UPDATE campaign_target SET stage='negotiating', updated_at=? WHERE campaign_id=? AND creator_id=?`, [today(), t.campaign_id, t.creator_id]);
-    } else if (code === "-1") {
-      // 이탈이 아니라 재큐잉이다. 6개월 뒤 다시 대상이 된다.
-      run(`UPDATE thread SET sequence_state='stopped_by_reply' WHERE id=?`, [threadId]);
-      run(`INSERT INTO outreach_log (creator_id, campaign_id, channel, sent_at, result) VALUES (?,?, 'email', ?, 'no_reply')`, [
-        t.creator_id,
-        t.campaign_id,
-        nowStamp(),
-      ]);
+    await c.query(`UPDATE campaign_member SET interest_status=$2, replied_at=COALESCE(replied_at, now()) WHERE id=$1`, [memberId, interest]);
+
+    if (eff.stage) {
+      await c.query(`UPDATE campaign_member SET stage_id=(SELECT id FROM pipeline_stage WHERE key=$2) WHERE id=$1`, [memberId, eff.stage]);
     }
-  })();
+    if (eff.engineState != null) {
+      // $2 를 두 자리에 그대로 쓰면 Postgres 가 타입을 timestamptz 와 smallint 로 다르게 추론한다.
+      await c.query(
+        `UPDATE campaign_member
+            SET engine_state = $2::smallint,
+                dropped_at = CASE WHEN $2::smallint < 0 THEN now() ELSE dropped_at END,
+                drop_reason = $3
+          WHERE id = $1`,
+        [memberId, eff.engineState, eff.dropReason ?? null]);
+    } else if (interest !== INTEREST.OOO) {
+      // 회신이 왔으면 시퀀스는 성공 종료다. 실패가 아니다.
+      await c.query(`UPDATE campaign_member SET engine_state=$2::smallint, next_action_at=NULL WHERE id=$1 AND engine_state > 0`, [memberId, ENGINE.REPLIED]);
+    }
 
-  invalidateFitCache();
+    if (eff.suppress) {
+      // 핸들과 이메일 양쪽을 등재한다. 하나만 막으면 다른 채널로 새어 나간다.
+      await c.query(
+        `INSERT INTO suppression (identifier_type, identifier_val, channels, reason)
+         VALUES ('ig_handle', $1, '{}', $2) ON CONFLICT DO NOTHING`,
+        [m.handle, eff.suppress.reason],
+      );
+      await c.query(
+        `INSERT INTO suppression (identifier_type, identifier_val, channels, reason)
+         SELECT 'email', value_norm, '{}', $2 FROM contact_point WHERE creator_id=$1 AND channel='email'
+         ON CONFLICT DO NOTHING`,
+        [m.creator_id, eff.suppress.reason],
+      );
+    }
+
+    if (eff.requeueAfterDays) {
+      // 이탈이 아니라 재큐잉이다.
+      await c.query(
+        `UPDATE campaign_member SET engine_state=$2::smallint, next_action_at = now() + ($3 || ' days')::interval WHERE id=$1`,
+        [memberId, ENGINE.PAUSED, eff.requeueAfterDays],
+      );
+    }
+
+    if (eff.parseReturnDate) {
+      const body = (
+        await c.query(`SELECT body FROM message WHERE campaign_member_id=$1 AND direction='in' ORDER BY sent_at DESC LIMIT 1`, [memberId])
+      ).rows[0]?.body as string | undefined;
+      const back = parseReturnDate(body);
+      await c.query(
+        `UPDATE campaign_member SET engine_state=$2::smallint, next_action_at=$3::timestamptz WHERE id=$1`,
+        [memberId, ENGINE.PAUSED_OOO, back ? `${back} 09:00+09` : null],
+      );
+    }
+
+    if (eff.issueToken) {
+      await c.query(
+        `INSERT INTO attribution_token (campaign_id, creator_id, kind, token)
+         VALUES ($1,$2,'link', encode(gen_random_bytes(8),'hex')) ON CONFLICT DO NOTHING`,
+        [m.campaign_id, m.creator_id],
+      );
+    }
+  });
+
+  await audit("campaign_member", memberId, "classify", `interest=${interest}`);
   revalidatePath("/inbox");
   revalidatePath("/dashboard");
+  revalidatePath("/campaigns");
 }
 
-/** 캠페인 스테이지 이동. 자동화는 카드를 왼쪽으로 되돌리지 않는다 — 사람만 되돌릴 수 있다. */
+/**
+ * 스테이지 이동.
+ * 자동화는 절대 뒤로 옮기지 않는다. 사람이 옮길 때도 사유가 없으면 거부한다.
+ */
 export async function moveStage(formData: FormData) {
-  const campaignId = Number(formData.get("campaignId"));
-  const creatorId = Number(formData.get("creatorId"));
-  const stage = String(formData.get("stage"));
-  run(`UPDATE campaign_target SET stage=?, updated_at=? WHERE campaign_id=? AND creator_id=?`, [stage, today(), campaignId, creatorId]);
+  const memberId = String(formData.get("memberId") ?? "");
+  const stage = String(formData.get("stage") ?? "");
+  const reason = String(formData.get("reason") ?? "").trim();
+  if (!memberId || !stage) return;
+
+  const cur = await one<{ sort_order: number; key: string }>(
+    `SELECT ps.sort_order, ps.key FROM campaign_member m JOIN pipeline_stage ps ON ps.id=m.stage_id WHERE m.id=$1`,
+    [memberId],
+  );
+  const next = await one<{ id: number; sort_order: number }>(`SELECT id, sort_order FROM pipeline_stage WHERE key=$1`, [stage]);
+  if (!cur || !next) return;
+
+  if (next.sort_order < cur.sort_order && !reason) {
+    redirect(`/campaigns?err=reason_required`);
+  }
+
+  await run(`UPDATE campaign_member SET stage_id=$2 WHERE id=$1`, [memberId, next.id]);
+  await audit("campaign_member", memberId, "stage_change", reason || `${cur.key} → ${stage}`);
   revalidatePath("/campaigns");
 }
 
 /** 추천 타깃을 캠페인에 담는다. */
 export async function addTarget(formData: FormData) {
-  const campaignId = Number(formData.get("campaignId"));
-  const creatorId = Number(formData.get("creatorId"));
-  run(`INSERT OR IGNORE INTO campaign_target (campaign_id, creator_id, stage, updated_at) VALUES (?,?, 'contacted', ?)`, [
-    campaignId,
-    creatorId,
-    today(),
-  ]);
+  const campaignId = String(formData.get("campaignId") ?? "");
+  const creatorId = String(formData.get("creatorId") ?? "");
+  if (!campaignId || !creatorId) return;
+  await run(
+    `INSERT INTO campaign_member (campaign_id, creator_id, stage_id, engine_state, reply_token, owner_user_id)
+     VALUES ($1,$2,(SELECT id FROM pipeline_stage WHERE key='qualified'), $3,
+             'cm_' || encode(gen_random_bytes(4),'hex'), $4)
+     ON CONFLICT (campaign_id, creator_id) DO NOTHING`,
+    [campaignId, creatorId, ENGINE.QUEUED, JAY],
+  );
   revalidatePath("/campaigns");
+}
+
+export async function markEventsRead() {
+  await run(`UPDATE change_event SET is_read = true WHERE NOT is_read`);
+  revalidatePath("/watch");
 }
 
 /**
  * 발송 실행.
  *
- * 게이트를 다시 통과시킨 뒤에만 큐에 넣는다. 화면에서 통과했더라도 그 사이
- * 수신거부가 등록됐을 수 있으므로 서버에서 한 번 더 계산한다.
+ * 화면에서 통과했더라도 그 사이 수신거부가 등재됐을 수 있으므로 대상마다 게이트를
+ * 다시 통과시킨다. 막힌 건은 gate_block 에 사유를 남긴다.
  */
 export async function startSend(formData: FormData) {
-  const campaignId = Number(formData.get("campaignId"));
-  const campaign = one<{ id: number; category: string; brand_id: number | null }>(
-    `SELECT id, category, brand_id FROM campaign WHERE id = ?`,
-    [campaignId],
-  );
+  const campaignId = String(formData.get("campaignId") ?? "");
+  if (!campaignId) return;
+
+  const campaign = await loadCampaignInfo(campaignId);
   if (!campaign) return;
 
-  const seg = buildSegment(campaign, DEFAULT_SEGMENT);
-  const gate = runGate(seg, "email");
-  if (!gate.allPass) {
-    redirect(`/send?step=3&campaign=${campaignId}&blocked=1`);
+  const inputs = await loadGateInputs();
+  const candidates = await loadSendCandidates(campaignId);
+  const sender = inputs.sender;
+  const now = new Date();
+
+  let queued = 0;
+  let blocked = 0;
+  let tasks = 0;
+
+  for (const cand of candidates) {
+    const ev = evaluateCandidate(cand, campaign, inputs, now);
+
+    if (!ev.gate.ok) {
+      blocked++;
+      await run(`INSERT INTO gate_block (campaign_member_id, channel, failed_check, detail) VALUES ($1,$2,$3,$4)`,
+        [cand.member_id, ev.channel, ev.gate.blocked!.check, ev.gate.blocked!.detail]);
+      continue;
+    }
+
+    // 콜드 자동 발송이 불가한 채널은 작업 큐로만 나간다.
+    if (ev.policy.automation_mode === "manual_task") {
+      await run(
+        `INSERT INTO outreach_task (campaign_member_id, channel, sender_id, rendered_subject, rendered_body, target_url, state, due_at)
+         VALUES ($1,$2,NULL,$3,$4,$5,'queued',$6)`,
+        [cand.member_id, ev.channel, ev.rendered!.subject, ev.rendered!.body,
+         `https://www.instagram.com/${cand.handle}`, nextBusinessSlot(now).toISOString()],
+      );
+      tasks++;
+      continue;
+    }
+
+    await tx(async (c) => {
+      await c.query(
+        `INSERT INTO message (campaign_member_id, sender_id, channel, direction, from_name, subject, body, status)
+         VALUES ($1,$2,'email','out',$3,$4,$5,'sent')`,
+        [cand.member_id, sender?.id ?? null, sender?.display_name ?? "Dinostudio", ev.rendered!.subject, ev.rendered!.body],
+      );
+      await c.query(
+        `UPDATE campaign_member SET engine_state=$2::smallint, current_step = current_step + 1,
+                first_sent_at = COALESCE(first_sent_at, now()), last_sent_at = now(),
+                stage_id = GREATEST(stage_id, (SELECT id FROM pipeline_stage WHERE key='contacted'))
+          WHERE id=$1 AND engine_state > 0`,
+        [cand.member_id, ENGINE.IN_SEQUENCE],
+      );
+      if (sender) {
+        await c.query(
+          `UPDATE sender SET sent_today = CASE WHEN sent_date=CURRENT_DATE THEN sent_today+1 ELSE 1 END,
+                             sent_date=CURRENT_DATE WHERE id=$1`,
+          [sender.id],
+        );
+      }
+    });
+    queued++;
+    if (sender) sender.sent_today++;
   }
 
-  const targets = seg.byChannel.email;
-  const stamp = nowStamp();
-
-  db().transaction(() => {
-    run(`INSERT INTO send_run (campaign_id, channel, planned, queued, started_at, eta, status) VALUES (?, 'email', ?, ?, ?, ?, 'queued')`, [
-      campaignId,
-      targets.length,
-      targets.length,
-      stamp,
-      `${gate.days}일 소요 예정`,
-    ]);
-    for (const t of targets) {
-      run(`INSERT OR IGNORE INTO campaign_target (campaign_id, creator_id, stage, updated_at) VALUES (?,?, 'contacted', ?)`, [
-        campaignId,
-        t.creatorId,
-        today(),
-      ]);
-      run(`INSERT INTO outreach_log (creator_id, campaign_id, channel, sent_at, result) VALUES (?,?, 'email', ?, 'sent')`, [
-        t.creatorId,
-        campaignId,
-        stamp,
-      ]);
-    }
-    // 인포크·DM 대상은 자동 발송하지 않고 작업 큐로 넘긴다.
-    for (const t of [...seg.byChannel.inpock, ...seg.byChannel.ig_dm].slice(0, 40)) {
-      run(`INSERT INTO task (kind, creator_id, campaign_id, sender_id, body, scheduled_at, status) VALUES (?,?,?,?,?,?, 'pending')`, [
-        t.channel === "inpock" ? "inpock" : "ig_dm",
-        t.creatorId,
-        campaignId,
-        t.channel === "ig_dm" ? one<{ id: number }>(`SELECT id FROM sender_account WHERE channel='ig_dm' AND status='ok' LIMIT 1`)?.id ?? null : null,
-        t.channel === "inpock"
-          ? "제안 유형: 공동구매 / 조건은 캠페인 설정을 따릅니다."
-          : "안녕하세요! 공구 제안드리고 싶어 연락드립니다.",
-        stamp,
-      ]);
-    }
-    const cap = one<{ n: number }>(`SELECT COALESCE(SUM(daily_cap - sent_today),0) AS n FROM sender_account WHERE channel='email' AND status!='suspended'`)!.n;
-    const todaySend = Math.min(targets.length, Math.max(0, cap));
-    run(`UPDATE sender_account SET sent_today = MIN(daily_cap, sent_today + ?) WHERE channel='email' AND status!='suspended'`, [
-      Math.ceil(todaySend / Math.max(1, all(`SELECT id FROM sender_account WHERE channel='email' AND status!='suspended'`).length)),
-    ]);
-  })();
-
-  invalidateFitCache(campaignId);
+  await audit("campaign", campaignId, "send", `queued=${queued} blocked=${blocked} tasks=${tasks}`);
   revalidatePath("/dashboard");
-  revalidatePath("/campaigns");
   revalidatePath("/queue");
-  redirect(`/send?step=3&campaign=${campaignId}&sent=${targets.length}`);
+  revalidatePath("/campaigns");
+  revalidatePath("/policy");
+  redirect(`/send?step=3&campaign=${campaignId}&sent=${queued}&blocked=${blocked}&tasks=${tasks}`);
 }
 
 // ---------- 임포트 ----------
 
-/** CSV 업로드 → 파싱 → 중복 분석. 아직 본 테이블은 건드리지 않는다. */
 export async function uploadCsv(formData: FormData) {
-  const source = String(formData.get("source") ?? "pang") as SourceKey;
+  const source = String(formData.get("source") ?? "pangpang") as SourceKey;
   const file = formData.get("file");
   if (!(file instanceof File) || file.size === 0) redirect("/import?step=1&err=nofile");
   if (!SOURCES[source]) redirect("/import?step=1&err=badsource");
 
   const text = await (file as File).text();
-  const analysis = analyze(text, source, (file as File).name);
-  if (!analysis.rows.length) redirect("/import?step=1&err=empty");
+  const batchId = await analyzeCsv(text, source, (file as File).name, JAY);
+  if (!batchId) redirect("/import?step=1&err=empty");
 
-  const batchId = saveBatch(analysis, nowStamp());
   revalidatePath("/import");
   redirect(`/import?step=3&batch=${batchId}`);
 }
 
-/** 검토 큐 한 행 처리. 사람이 병합/분리를 결정한다. */
-export async function decideRow(formData: FormData) {
-  const rowId = Number(formData.get("rowId"));
-  const decision = String(formData.get("decision"));
-  if (!["merge", "split"].includes(decision)) return;
-  run(`UPDATE import_row SET decision = ? WHERE id = ?`, [decision, rowId]);
+export async function decideMerge(formData: FormData) {
+  const id = String(formData.get("id") ?? "");
+  const decision = String(formData.get("decision") ?? "");
+  if (!id || !["merge", "split"].includes(decision)) return;
+  await run(`UPDATE merge_candidate SET decision=$2, decided_by=$3, decided_at=now() WHERE id=$1`, [id, decision, JAY]);
   revalidatePath("/import");
 }
 
-/** 배치 반영. 검토 미처리 행은 그대로 남는다. */
-export async function applyImport(formData: FormData) {
-  const batchId = Number(formData.get("batchId"));
-  const result = applyBatch(batchId, nowStamp());
-  invalidateFitCache();
+export async function commitImport(formData: FormData) {
+  const batchId = String(formData.get("batchId") ?? "");
+  if (!batchId) return;
+  const res = await commitBatch(batchId, JAY);
   revalidatePath("/import");
   revalidatePath("/influencers");
-  revalidatePath("/dashboard");
-  redirect(`/import?step=4&batch=${batchId}&created=${result.created}&updated=${result.updated}&skipped=${result.skipped}`);
-}
-
-/** 공구 찜 토글. */
-export async function togglePick(formData: FormData) {
-  const dealId = Number(formData.get("dealId"));
-  run(`UPDATE deal SET picked = 1 - picked WHERE id = ?`, [dealId]);
-  revalidatePath("/feed");
-}
-
-/** 변화 감지 이벤트 확인 처리. */
-export async function markEventsSeen() {
-  run(`UPDATE delta_event SET seen = 1 WHERE seen = 0`);
   revalidatePath("/watch");
+  redirect(`/import?step=4&batch=${batchId}&created=${res.created}&merged=${res.merged}&skipped=${res.skipped}&events=${res.events}`);
 }
