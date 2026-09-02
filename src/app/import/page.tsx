@@ -37,7 +37,7 @@ export default async function ImportPage({
     ? await one<Batch>(`SELECT ${BATCH_COLS} FROM import_batch WHERE id=$1`, [sp.batch])
     : await one<Batch>(`SELECT ${BATCH_COLS} FROM import_batch WHERE state='dry_run' ORDER BY created_at DESC LIMIT 1`);
 
-  const [candidates, history] = await Promise.all([
+  const [candidates, history, tail] = await Promise.all([
     batch
       ? all<{ id: string; incoming: { handle: string; line: number; handleChanged: boolean }; score: string; evidence: string; decision: string | null; candidate_handle: string | null; candidate_name: string | null }>(
           `SELECT mc.id, mc.incoming, mc.score, mc.evidence, mc.decision,
@@ -54,7 +54,15 @@ export default async function ImportPage({
               COALESCE(u.name,'—') AS uploader
          FROM import_batch b LEFT JOIN app_user u ON u.id=b.uploaded_by
         ORDER BY b.observed_at DESC LIMIT 12`),
+    batch
+      ? one<{ deferred: number; events: number }>(
+          `SELECT (SELECT count(*)::int FROM import_row WHERE batch_id=$1 AND state='deferred') AS deferred,
+                  (SELECT count(*)::int FROM change_event WHERE batch_id=$1) AS events`,
+          [batch.id])
+      : Promise.resolve(null),
   ]);
+  const deferredCount = tail?.deferred ?? 0;
+  const batchEvents = tail?.events ?? 0;
 
   const link = (n: number, s2: string = src) => `/import?step=${n}&src=${s2}${batch ? `&batch=${batch.id}` : ""}`;
   const decided = candidates.filter((c) => c.decision).length;
@@ -245,12 +253,15 @@ export default async function ImportPage({
             <Card>
               <div className="card-b" style={{ textAlign: "center", padding: "44px 20px" }}>
                 <div style={{ fontFamily: "'IBM Plex Mono',monospace", fontSize: 30, fontWeight: 600, color: "var(--ok)" }}>
-                  {fmt(Number(sp.created ?? 0) + Number(sp.merged ?? 0))}
+                  {fmt((batch?.rows_new ?? 0) + (batch?.rows_merged ?? 0))}
                 </div>
                 <div style={{ marginTop: 6, fontSize: 14 }}>건 반영 완료</div>
+                {/* 숫자는 DB 에서 읽는다. 예전에는 쿼리 파라미터로 넘겼는데, 커밋을 여러
+                    요청에 나눠 하게 되면서 한 번의 리다이렉트에 담을 수 없어졌다. */}
                 <p className="lede" style={{ margin: "12px auto 0", maxWidth: "52ch" }}>
-                  신규 {fmt(sp.created ?? 0)}명이 추가되고 {fmt(sp.merged ?? 0)}명의 스냅샷이 갱신됐습니다.
-                  미처리 {fmt(sp.skipped ?? 0)}건은 검토 큐에 남아 있고, 변화 이벤트 {fmt(sp.events ?? 0)}건이 생성됐습니다.
+                  신규 {fmt(batch?.rows_new ?? 0)}명이 추가되고 {fmt(batch?.rows_merged ?? 0)}명의 스냅샷이
+                  갱신됐습니다. 미처리 {fmt(deferredCount)}건은 검토 큐에 남아 있고,
+                  변화 이벤트 {fmt(batchEvents)}건이 생성됐습니다.
                 </p>
                 <div style={{ display: "flex", gap: 8, justifyContent: "center", marginTop: 18 }}>
                   <Link className="btn" href={link(3)}>검토 큐로</Link>

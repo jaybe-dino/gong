@@ -2,6 +2,7 @@ import Link from "next/link";
 import Shell from "@/components/Shell";
 import { Card, Empty, FitBar, IgLink, Note, Pill, Scroller } from "@/components/ui";
 import CreatorDrawer from "./CreatorDrawer";
+import FitRefresh from "./FitRefresh";
 import { loadCreators, listCampaigns, type ScoredCreator } from "@/lib/queries";
 import { fmt, fol, STAGE_TONE } from "@/lib/format";
 import { TIER_LABEL } from "@/lib/score";
@@ -26,32 +27,24 @@ export default async function InfluencersPage({
   const onlyReach = sp.reach === "1";
   const page = Math.max(1, Number(sp.page ?? 1) || 1);
 
-  // 정렬이 점수·타이밍이면 모집단을 다 받아 메모리에서 줄 세운다 (한 번의 조회로 214ms).
-  const { rows, campaign } = await loadCreators({
+  // 정렬·자르기를 DB 가 한다.
+  //
+  // 전에는 limit 5000 으로 받아 메모리에서 줄 세웠다. 시드 1,742명일 때는 전원이
+  // 들어왔지만 1.9만 건을 임포트하면 팔로워 상위 5,000명만 들어온다 — 팔로워는
+  // 낮아도 적합도가 높은 크리에이터가 목록에서 사라진다. 적합도 순위가 이 제품의
+  // 핵심인데 그 순위가 팔로워로 먼저 걸러지고 있었다.
+  const { rows: shown, total, campaign, unscored } = await loadCreators({
     campaignId: sp.campaign ?? null,
     category: cat === "전체" ? null : cat,
     search: q || null,
-    limit: 5000,
+    reachable: onlyReach,
+    order: sort as "fit" | "followers" | "deals" | "timing",
+    limit: PAGE,
+    offset: (page - 1) * PAGE,
   });
   const campaigns = await listCampaigns();
 
-  let list = rows;
-  if (onlyReach) list = list.filter((r) => r.reach && r.reach !== "dm" && !r.fit.excluded);
-
-  const sorted = [...list].sort((a, b) => {
-    if (sort === "followers") return (b.followers ?? 0) - (a.followers ?? 0);
-    if (sort === "deals") return (b.deals_30d ?? 0) - (a.deals_30d ?? 0);
-    if (sort === "timing") {
-      const ra = a.timing.ratio == null ? 99 : Math.abs(a.timing.ratio - 1);
-      const rb = b.timing.ratio == null ? 99 : Math.abs(b.timing.ratio - 1);
-      return ra - rb;
-    }
-    if (a.fit.excluded !== b.fit.excluded) return a.fit.excluded ? 1 : -1;
-    return b.fit.score - a.fit.score;
-  });
-
-  const pages = Math.max(1, Math.ceil(sorted.length / PAGE));
-  const shown = sorted.slice((page - 1) * PAGE, page * PAGE);
+  const pages = Math.max(1, Math.ceil(total / PAGE));
 
   const link = (o: Record<string, string | undefined>) => {
     const u = new URLSearchParams();
@@ -67,7 +60,7 @@ export default async function InfluencersPage({
   };
 
   return (
-    <Shell path="/influencers" title="인플루언서 DB" sub={`3개 소스 병합 · ${fmt(rows.length)}명`}>
+    <Shell path="/influencers" title="인플루언서 DB" sub={`3개 소스 병합 · ${fmt(total)}명`}>
       <section className="screen">
         <form className="filterbar" method="get" action="/influencers">
           <div className="search">
@@ -99,8 +92,12 @@ export default async function InfluencersPage({
           </Link>
         </div>
 
+        {unscored > 0 && (
+          <FitRefresh campaignId={campaign?.id ?? ""} unscored={unscored} campaignName={campaign?.name ?? ""} />
+        )}
+
         <Card
-          title={`${fmt(sorted.length)}명 · ${page}/${pages} 페이지`}
+          title={`${fmt(total)}명 · ${page}/${pages} 페이지`}
           hint="이름을 클릭하면 통합 프로필이 열립니다"
           right={<Link className="btn pri sm" href={`/send?campaign=${campaign?.id ?? ""}`}>제안 발송으로</Link>}
         >

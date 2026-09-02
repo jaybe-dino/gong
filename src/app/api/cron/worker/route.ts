@@ -2,6 +2,8 @@ import { NextResponse } from "next/server";
 import { tick as sequenceTick } from "@/lib/jobs/sequence-worker";
 import { tick as inboundTick } from "@/lib/jobs/inbound-sync";
 import { tick as breakerTick, rampUp, resetDaily } from "@/lib/jobs/circuit-breaker";
+import { refreshFit } from "@/lib/jobs/refresh-fit";
+import { defaultCampaign } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -30,6 +32,11 @@ export async function GET(req: Request) {
     ["breaker", breakerTick],
     ["inbound", inboundTick],
     ["sequence", () => sequenceTick({ limit: 50 })],
+    // 적합도 캐시. 임포트가 무효화한 만큼만 채운다 — 사람이 화면을 안 열어도 채워져야 한다.
+    ["fit", async () => {
+      const c = await defaultCampaign();
+      return c ? await refreshFit(c.id, { limit: 2000 }) : { scored: 0, remaining: 0, done: true };
+    }],
   ] as const) {
     try {
       out[name] = await fn();

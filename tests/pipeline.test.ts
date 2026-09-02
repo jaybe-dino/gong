@@ -244,7 +244,9 @@ test("임포트 — 소스 PK 가 같고 핸들이 다르면 검토 큐로 가�
   const acc = await one<{ handle: string; pid: string }>(
     `SELECT sa.handle, sr.source_pk AS pid
        FROM source_ref sr JOIN social_account sa ON sa.creator_id = sr.entity_id
-      WHERE sr.entity='creator' AND sr.source='pangpang' LIMIT 1`);
+      WHERE sr.entity='creator' AND sr.source='pangpang'
+      ORDER BY sr.source_pk DESC LIMIT 1`);
+  assert.ok(acc, "팡팡 소스 계정이 시드에 있어야 한다");
   const csv = `handle,display_name,팔로워,account_id\n@renamed_${acc!.pid},바뀐이름,5만,${acc!.pid}\n`;
   const batchId = (await analyzeCsv(csv, "pangpang", "rename.csv", JAY))!;
 
@@ -584,15 +586,22 @@ test("임포트 — 담기와 대조가 나뉘고 청크로 이어진다", async
 });
 
 test("임포트 — 검토 미결정 행은 보류되고 결정 후 반영된다", async () => {
+  // ORDER BY 없는 LIMIT 1 은 실행마다 다른 행을 집는다. 고정한다.
   const acc = await one<{ handle: string; pid: string }>(
     `SELECT sa.handle, sr.source_pk AS pid
        FROM source_ref sr JOIN social_account sa ON sa.creator_id = sr.entity_id
-      WHERE sr.entity='creator' AND sr.source='pangpang' LIMIT 1`);
+      WHERE sr.entity='creator' AND sr.source='pangpang'
+      ORDER BY sr.source_pk LIMIT 1`);
+  assert.ok(acc, "팡팡 소스 계정이 시드에 있어야 한다");
   const csv = `handle,display_name,팔로워,account_id\n@defer_${acc!.pid},보류대상,5만,${acc!.pid}\n`;
+
   const batchId = (await analyzeCsv(csv, "pangpang", "defer.csv", JAY))!;
 
+  const diag = await all<{ verdict: string; evidence: string; handle: string }>(
+    `SELECT verdict, evidence, handle FROM import_row WHERE batch_id=$1`, [batchId]);
   const r1 = await commitBatch(batchId, JAY);
-  assert.equal(r1.deferred, 1, "결정 전에는 보류돼야 한다");
+  assert.equal(r1.deferred, 1,
+    `결정 전에는 보류돼야 한다 — 판정 ${JSON.stringify(diag)} / 고른 계정 ${acc!.handle}(${acc!.pid})`);
   assert.equal(r1.created + r1.merged, 0);
   assert.equal(r1.done, true, "보류 행이 남아도 진행은 끝나야 한다 (무한 반복 방지)");
 
@@ -604,4 +613,62 @@ test("임포트 — 검토 미결정 행은 보류되고 결정 후 반영된다
   assert.equal(await reopenDecided(batchId), 1, "결정된 행은 다시 대기로 돌아온다");
   const r2 = await commitBatch(batchId, JAY);
   assert.equal(r2.merged, 1);
+});
+
+// ---------- 적합도 점수 캐시 ----------
+
+test("적합도 캐시 — 청크로 채워지고 순위를 DB 가 정한다", async () => {
+  const RF = await import("../src/lib/jobs/refresh-fit.ts");
+  const camp = await one<{ id: string }>(`SELECT id FROM campaign ORDER BY created_at LIMIT 1`);
+  await run(`DELETE FROM creator_fit WHERE campaign_id=$1`, [camp!.id]);
+
+  const first = await RF.refreshFit(camp!.id, { limit: 50 });
+  assert.equal(first.scored, 50);
+  assert.equal(first.done, false, "남은 게 있으면 done 이 아니다");
+
+  for (let guard = 0; guard < 200; guard++) {
+    if ((await RF.refreshFit(camp!.id, { limit: 500 })).done) break;
+  }
+  const total = await one<{ n: number }>(`SELECT count(*)::int AS n FROM creator WHERE merged_into IS NULL`);
+  const cached = await one<{ n: number }>(`SELECT count(*)::int AS n FROM creator_fit WHERE campaign_id=$1`, [camp!.id]);
+  assert.equal(cached!.n, total!.n, "살아 있는 크리에이터 전원에 점수가 있어야 한다");
+
+  // 캐시 점수와 즉석 계산이 어긋나면 목록 순서가 거짓이 된다.
+  const { loadCreators } = await import("../src/lib/queries.ts");
+  const { rows } = await loadCreators({ campaignId: camp!.id, order: "fit", limit: 10 });
+  const cachedScores = await all<{ creator_id: string; score: number }>(
+    `SELECT creator_id, score FROM creator_fit WHERE campaign_id=$1 AND creator_id = ANY($2::uuid[])`,
+    [camp!.id, rows.map((r) => r.creator_id)]);
+  const byId = Object.fromEntries(cachedScores.map((c) => [c.creator_id, c.score]));
+  for (const r of rows) {
+    assert.equal(byId[r.creator_id], Math.round(r.fit.score),
+      `캐시(${byId[r.creator_id]})와 즉석 계산(${Math.round(r.fit.score)})이 다르다: ${r.handle}`);
+  }
+  // 제외 대상은 뒤로, 그 안에서는 점수 내림차순
+  const keys = rows.map((r) => (r.fit.excluded ? 1 : 0));
+  assert.deepEqual(keys, [...keys].sort(), "제외 대상이 앞에 오면 안 된다");
+});
+
+test("적합도 캐시 — 임포트가 건드린 크리에이터는 다시 계산 대상이 된다", async () => {
+  const RF = await import("../src/lib/jobs/refresh-fit.ts");
+  const camp = await one<{ id: string }>(`SELECT id FROM campaign ORDER BY created_at LIMIT 1`);
+  for (let guard = 0; guard < 200; guard++) {
+    if ((await RF.refreshFit(camp!.id, { limit: 2000 })).done) break;
+  }
+
+  // 표시명을 그대로 써야 자동 병합된다. 크게 다르면 '동명이인 가능' 으로 검토 큐에
+  // 가는 게 맞는 동작이라 반영되지 않는다.
+  const target = await one<{ handle: string; display_name: string }>(
+    `SELECT sa.handle, c.display_name FROM social_account sa JOIN creator c ON c.id = sa.creator_id
+      ORDER BY sa.handle LIMIT 1`);
+  const csv = `handle,display_name,팔로워\n${target!.handle},${target!.display_name},9.9만\n`;
+  const batchId = (await analyzeCsv(csv, "pangpang", "restale.csv", JAY))!;
+  for (let guard = 0; guard < 10; guard++) {
+    if ((await commitBatch(batchId, JAY)).done) break;
+  }
+
+  assert.ok(await RF.invalidateFitForBatch(batchId) > 0, "건드린 크리에이터의 캐시가 지워져야 한다");
+  const { loadCreators } = await import("../src/lib/queries.ts");
+  const { unscored } = await loadCreators({ campaignId: camp!.id, limit: 1 });
+  assert.ok(unscored > 0, "화면이 '미계산 N명' 을 알 수 있어야 한다");
 });

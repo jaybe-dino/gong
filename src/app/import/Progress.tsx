@@ -41,8 +41,13 @@ export default function Progress({
           if (cancelled) return;
           setSt(r);
           if (r.done) {
-            if (phase === "commit") setTail(await finalizeImport(batchId));
-            router.refresh();
+            if (phase === "commit") {
+              setTail(await finalizeImport(batchId));
+              // 반영이 끝나면 요약으로 넘긴다. 숫자는 그 화면이 DB 에서 읽는다.
+              router.push(`/import?step=4&batch=${batchId}`);
+            } else {
+              router.refresh();
+            }
             return;
           }
         }

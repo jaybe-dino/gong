@@ -242,14 +242,17 @@ describe("아웃리치 콘솔 E2E", () => {
     const before = await n(`SELECT count(*) AS n FROM creator`);
 
     await submit(page.getByRole("button", { name: /건 반영$/ }));
-    await page.waitForURL(/step=4/, { timeout: 30000 });
 
+    // 반영은 여러 요청에 나눠 돈다. 화면의 진행 컴포넌트가 이어 돌리고 끝나면
+    // 요약(step=4)으로 넘어간다.
+    await page.waitForURL(/step=4/, { timeout: 120000 });
     assert.match(await page.locator(".screen").innerText(), /건 반영 완료/);
-    const created = Number(new URL(page.url()).searchParams.get("created"));
-    const merged = Number(new URL(page.url()).searchParams.get("merged"));
-    assert.ok(created + merged > 0, "무언가는 반영돼야 한다");
-    assert.equal(await n(`SELECT count(*) AS n FROM creator`), before + created);
-    assert.equal((await one<{ state: string }>(`SELECT state FROM import_batch ORDER BY created_at DESC LIMIT 1`))!.state, "committed");
+
+    const batch = await one<{ state: string; rows_new: number; rows_merged: number }>(
+      `SELECT state, rows_new, rows_merged FROM import_batch ORDER BY created_at DESC LIMIT 1`);
+    assert.equal(batch!.state, "committed");
+    assert.ok(batch!.rows_new + batch!.rows_merged > 0, "무언가는 반영돼야 한다");
+    assert.equal(await n(`SELECT count(*) AS n FROM creator`), before + batch!.rows_new);
   });
 
   test("제안 발송 — 게이트를 통과한 건만 나가고 막힌 건은 사유가 남는다", async () => {

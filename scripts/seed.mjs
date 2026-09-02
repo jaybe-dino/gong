@@ -88,6 +88,12 @@ const accountRows = [];
 const snapRows = [];
 const contactRows = [];
 const srefRows = [];
+// 공구팡팡 account_id 는 유일해야 한다. addCreator 가 먼저 쓰므로 위에 둔다 (TDZ).
+//
+// 5십만부터 센다. samples/pangpang.csv 가 9306·9412·9501·9902 를 쓰는데, 시드가
+// 9000번대를 쓰면 무관한 크리에이터와 번호가 겹쳐서 샘플 임포트가 엉뚱한 사람으로
+// 병합된다 (실제로 그랬다).
+let pangPk = 500000;
 const byHandle = {};
 
 function addCreator(o) {
@@ -102,8 +108,18 @@ function addCreator(o) {
     o.lastActive ?? `${shiftDays(TODAY, int(0, 3))} 09:00+09`,
     o.deals30, o.deals90, o.cadence, o.lastDealDays, JSON.stringify(o.share ?? {}),
   ]);
+  // 소스 PK 는 각 사이트가 실제로 주는 형태를 흉내낸다.
+  //   pangpang 숫자 계정 번호 (CSV 의 account_id)
+  //   ingong   uuid
+  //   momcal   슬러그
+  // 이걸 `${s}-${handle}` 같은 한 가지 형태로 만들면 임포터가 넣는 값과 모양이
+  // 달라져서, 실제 CSV 를 올릴 때 시드된 크리에이터와 소스 PK 로 매칭되지 않는다.
   for (const s of o.sources ?? []) {
-    srefRows.push(["creator", cid, s, `${s}-${o.handle}`, IG(o.handle), TODAY]);
+    const pk =
+      s === "pangpang" ? String(o.platformUserId ?? ++pangPk)
+      : s === "ingong" ? uid()
+      : o.handle.replace(/[._]/g, "-");
+    srefRows.push(["creator", cid, s, pk, IG(o.handle), TODAY]);
   }
   return { cid, aid };
 }
@@ -155,7 +171,6 @@ const NK2 = ["하루","살림","주방","육아","일상","테이블","집","기
 const TARGET = 1742;
 const used = new Set(Object.keys(byHandle).map(cmpKey));
 const generated = [];
-let pangPk = 9000; // 공구팡팡 account_id 는 유일해야 한다
 
 while (used.size < TARGET) {
   const handle = `${pick(A)}${rnd() < 0.55 ? "_" : rnd() < 0.5 ? "." : ""}${pick(B)}${pick(C)}`;

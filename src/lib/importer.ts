@@ -322,8 +322,13 @@ export async function matchBatch(batchId: string, opts: { limit?: number } = {})
     const existing = await all<Candidate & { creator_id: string }>(
       `SELECT c.id, c.display_name, sa.handle, c.id AS creator_id,
               (SELECT followers FROM account_snapshot s WHERE s.social_account_id=sa.id ORDER BY s.captured_at DESC LIMIT 1) AS followers,
-              (SELECT jsonb_object_agg(sr.source, sr.source_pk)
-                 FROM source_ref sr WHERE sr.entity='creator' AND sr.entity_id=c.id) AS source_pks
+              -- 소스별로 PK 를 배열로 모은다. jsonb_object_agg 에 (source, pk) 를 그대로
+              -- 넣으면 같은 소스의 PK 가 여러 개일 때 하나만 남고 나머지가 조용히 버려진다.
+              (SELECT jsonb_object_agg(g.source, g.pks) FROM (
+                 SELECT sr.source, jsonb_agg(DISTINCT sr.source_pk) AS pks
+                   FROM source_ref sr
+                  WHERE sr.entity='creator' AND sr.entity_id=c.id
+                  GROUP BY sr.source) g) AS source_pks
          FROM creator c JOIN social_account sa ON sa.creator_id=c.id WHERE c.merged_into IS NULL`,
     );
     const index = buildIndex(existing);
@@ -505,10 +510,13 @@ export async function commitBatch(
 
     const n = normalizeRow(r.raw, batch.source);
     try {
-      const outcome = await applyRow(n, target, userId, batch.source);
+      const { outcome, creatorId } = await applyRow(n, target, userId, batch.source);
       if (outcome === "created") created++;
       else merged++;
-      await run(`UPDATE import_row SET state='applied', applied_at=now(), error=NULL WHERE id=$1`, [r.id]);
+      await run(
+        `UPDATE import_row SET state='applied', applied_at=now(), error=NULL, applied_creator_id=$2 WHERE id=$1`,
+        [r.id, creatorId],
+      );
     } catch (e) {
       // 한 행이 터져도 배치를 멈추지 않는다. 사유를 남기고 넘어간다.
       await run(`UPDATE import_row SET state='skipped', applied_at=now(), error=$2 WHERE id=$1`,
@@ -577,7 +585,7 @@ async function applyRow(
   target: string | null,
   userId: string,
   source: SourceKey,
-): Promise<"created" | "merged"> {
+): Promise<{ outcome: "created" | "merged"; creatorId: string }> {
   return await tx(async (c) => {
     let creatorId = target;
     let accountId: string | null = null;
@@ -652,6 +660,6 @@ async function applyRow(
          `https://www.instagram.com/${n.handle}`, n.curated]);
     }
 
-    return outcome;
+    return { outcome, creatorId: creatorId! };
   });
 }

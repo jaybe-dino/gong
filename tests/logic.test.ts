@@ -108,7 +108,7 @@ test("CSV 파서 — 따옴표 안의 쉼표·개행·이스케이프", () => {
 test("같은 소스의 PK 가 같으면 핸들이 달라도 같은 사람 — 핸들 변경 신호", () => {
   const m = D.scoreMatch(
     { handle: "joo0.is.happy", sourcePk: "9306", source: "pangpang", displayName: "주영이네" },
-    { id: "x", handle: "hi.iamjoo0", source_pks: { pangpang: "9306" }, display_name: "주영이네" },
+    { id: "x", handle: "hi.iamjoo0", source_pks: { pangpang: ["9306"] }, display_name: "주영이네" },
   );
   assert.equal(m.score, 1);
   assert.equal(m.deterministic, true);
@@ -120,13 +120,13 @@ test("소스가 다르면 PK 번호가 겹쳐도 같은 사람이 아니다", ()
   // 예전에는 두 값을 한 칸에 넣고 소스 구분 없이 비교해 엉뚱한 병합이 났다.
   const m = D.scoreMatch(
     { handle: "aaa.bbb", sourcePk: "9306", source: "ingong", displayName: "가나다" },
-    { id: "x", handle: "zzz.qqq", source_pks: { pangpang: "9306" }, display_name: "하마루" },
+    { id: "x", handle: "zzz.qqq", source_pks: { pangpang: ["9306"] }, display_name: "하마루" },
   );
   assert.equal(m.deterministic, false);
   assert.equal(m.score, 0, "핸들도 다르니 후보가 아니다");
 
   const idx = D.buildIndex([
-    { id: "p", handle: "zzz.qqq", source_pks: { pangpang: "9306" }, display_name: "하마루" },
+    { id: "p", handle: "zzz.qqq", source_pks: { pangpang: ["9306"] }, display_name: "하마루" },
   ]);
   assert.equal(D.findBest(idx, { handle: "aaa.bbb", sourcePk: "9306", source: "ingong" }), null);
   assert.ok(D.findBest(idx, { handle: "aaa.bbb", sourcePk: "9306", source: "pangpang" }), "같은 소스면 잡는다");
@@ -422,7 +422,7 @@ function population(n: number, seed = 7) {
     out.push({
       id: `c${i}`,
       handle: h,
-      source_pks: { pangpang: String(900000 + i) },
+      source_pks: { pangpang: [String(900000 + i)] },
       display_name: `${p(A)}맘`,
       followers: Math.floor(r() * 300000) + 3000,
     });
@@ -452,7 +452,7 @@ test("중복 판정 인덱스 — 전수 비교와 같은 판정을 낸다", () 
     const kind = Math.floor(r() * 5);
     if (kind === 0) {
       // 소스 PK 동일 · 핸들 변경
-      probes.push({ sourcePk: c.source_pks.pangpang, source: "pangpang", handle: `${c.handle}_new`, displayName: c.display_name, followers: c.followers });
+      probes.push({ sourcePk: c.source_pks.pangpang[0], source: "pangpang", handle: `${c.handle}_new`, displayName: c.display_name, followers: c.followers });
     } else if (kind === 1) {
       probes.push({ handle: c.handle, displayName: c.display_name, followers: c.followers });
     } else if (kind === 2) {
@@ -512,4 +512,19 @@ test("CSV 레코드 분할 — 따옴표 안의 개행은 자르지 않는다", 
   assert.equal(recs[1], '1,"줄1\n줄2"');
   // 이스케이프된 따옴표가 상태를 뒤집지 않아야 한다
   assert.equal(splitRecords('h\n"그는 ""안녕"" 이라 했다"\n뒤행').length, 3);
+});
+
+test("한 소스에 PK 가 여러 개면 어느 쪽으로 들어와도 같은 사람이다", () => {
+  // 사이트가 계정 번호를 바꾸거나 두 크리에이터를 병합하면 PK 가 여럿 남는다.
+  // 소스별로 하나만 들고 있으면 옛 PK 로 들어온 행이 신규가 돼서 같은 사람이 두 번 생긴다.
+  const cand = { id: "c", handle: "livingnote.k", source_pks: { pangpang: ["500001", "9501"] }, display_name: "리빙노트" };
+  const idx = D.buildIndex([cand]);
+  for (const pk of ["500001", "9501"]) {
+    const hit = D.findBest(idx, { handle: "renamed_x", sourcePk: pk, source: "pangpang", displayName: "리빙노트" });
+    assert.ok(hit, `PK ${pk} 로 찾아야 한다`);
+    assert.equal(hit!.m.deterministic, true);
+    assert.equal(hit!.m.handleChanged, true);
+  }
+  assert.equal(D.findBest(idx, { handle: "renamed_x", sourcePk: "777", source: "pangpang" }), null,
+    "없는 PK 는 매칭되지 않는다");
 });

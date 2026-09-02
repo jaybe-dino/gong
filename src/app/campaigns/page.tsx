@@ -38,12 +38,28 @@ export default async function CampaignsPage({
     all<{ key: string; label: string }>(`SELECT key, label FROM pipeline_stage WHERE is_enabled ORDER BY sort_order`),
   ]);
 
-  // 타깃 추천 — 아직 담지 않은 크리에이터 중 적합도 상위
-  const { rows } = await loadCreators({ campaignId: campaign?.id ?? null, limit: 5000 });
-  const memberIds = new Set(members.map((m) => m.handle));
-  const pool = rows.filter((r) => !memberIds.has(r.handle));
-  const recos = pool.filter((r) => !r.fit.excluded).sort((a, b) => b.fit.score - a.fit.score).slice(0, 6);
-  const excluded = pool.filter((r) => r.fit.excluded && r.fit.reason && !r.suppressed).slice(0, 4);
+  // 타깃 추천 — 아직 담지 않은 크리에이터 중 적합도 상위.
+  //
+  // 전에는 5,000명을 받아 메모리에서 걸렀다. 1.9만 건을 임포트한 뒤에는 그 5,000명이
+  // 팔로워 상위로 미리 잘려서 추천이 팔로워 큰 계정으로만 채워졌다. 캐시된 점수로
+  // DB 가 정렬·제외하고 필요한 만큼만 가져온다.
+  const [{ rows: recos }, { rows: excludedPool }] = await Promise.all([
+    loadCreators({
+      campaignId: campaign?.id ?? null,
+      notInCampaign: campaign?.id ?? null,
+      onlyExcluded: false,
+      order: "fit",
+      limit: 6,
+    }),
+    loadCreators({
+      campaignId: campaign?.id ?? null,
+      notInCampaign: campaign?.id ?? null,
+      onlyExcluded: true,
+      order: "fit",
+      limit: 12,
+    }),
+  ]);
+  const excluded = excludedPool.filter((r) => r.fit.reason && !r.suppressed).slice(0, 4);
 
   const totalGmv = members.reduce((a, m) => a + Number(m.gmv), 0);
   const stageMap = Object.fromEntries(stages.map((s) => [s.key, Number(s.n)]));

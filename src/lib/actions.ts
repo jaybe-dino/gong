@@ -8,6 +8,7 @@ import { evaluateCandidate, loadCampaignInfo, loadGateInputs, loadSendCandidates
 import { classifyReply } from "./jobs/inbound-sync";
 import { reportActionBlock } from "./jobs/circuit-breaker";
 import { detectChanges } from "./jobs/detect-changes";
+import { invalidateFitForBatch, refreshFit, type FitProgress } from "./jobs/refresh-fit";
 import { gmail } from "./channels";
 import { interestEffects, INTEREST, ENGINE } from "./states";
 import { parseReturnDate } from "./parse";
@@ -289,14 +290,23 @@ export async function commitStep(batchId: string): Promise<StepResult> {
  * 커밋을 여러 요청에 나눠 하므로 변화 감지는 마지막에 한 번만 돈다.
  * 매 청크마다 돌면 같은 이벤트가 중복 생성된다.
  */
-export async function finalizeImport(batchId: string): Promise<{ events: number; excluded: number }> {
+export async function finalizeImport(batchId: string): Promise<{ events: number; excluded: number; restale: number }> {
   const b = await one<{ created_at: string }>(`SELECT created_at FROM import_batch WHERE id=$1`, [batchId]);
   const since = b ? new Date(b.created_at) : new Date(Date.now() - 3600_000);
   const delta = await detectChanges({ batchId, since });
+  // 새 스냅샷·딜이 들어왔으니 그 크리에이터의 적합도는 더 이상 유효하지 않다.
+  const restale = await invalidateFitForBatch(batchId);
   revalidatePath("/import");
   revalidatePath("/influencers");
   revalidatePath("/watch");
-  return { events: delta.events.length, excluded: delta.autoExcluded };
+  return { events: delta.events.length, excluded: delta.autoExcluded, restale };
+}
+
+/** 적합도 점수 캐시 한 청크. 화면이 done 까지 반복 호출한다. */
+export async function fitStep(campaignId: string): Promise<FitProgress> {
+  const r = await refreshFit(campaignId);
+  if (r.done) revalidatePath("/influencers");
+  return r;
 }
 
 export async function decideMerge(formData: FormData) {

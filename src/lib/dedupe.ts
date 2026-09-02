@@ -51,8 +51,14 @@ export interface Incoming {
 export interface Candidate {
   id: string;
   handle: string;
-  /** { pangpang: "9306", ingong: "uuid…" } — source_ref 에서 모은다. */
-  source_pks?: Record<string, string> | null;
+  /**
+   * { pangpang: ["9306", "500001"], ingong: ["uuid…"] } — source_ref 에서 모은다.
+   *
+   * 소스 하나에 PK 가 여러 개일 수 있다. 사이트가 계정 번호를 바꾸거나, 두 크리에이터를
+   * 병합하면 양쪽 PK 가 다 남는다. 소스별로 하나만 들고 있으면 옛 PK 로 들어온 행이
+   * "일치하는 계정 없음" 이 돼서 같은 사람이 두 번 생긴다.
+   */
+  source_pks?: Record<string, string[]> | null;
   display_name?: string | null;
   followers?: number | null;
 }
@@ -68,8 +74,8 @@ export function scoreMatch(incoming: Incoming, cand: Candidate): MatchResult {
   const ev: string[] = [];
 
   // 1. 같은 소스의 PK 동일 — 핸들이 달라도 같은 사람. 핸들 변경 신호.
-  const candPk = incoming.source ? cand.source_pks?.[incoming.source] : undefined;
-  if (incoming.sourcePk && candPk && String(incoming.sourcePk) === String(candPk)) {
+  const candPks = incoming.source ? cand.source_pks?.[incoming.source] : undefined;
+  if (incoming.sourcePk && candPks?.some((pk) => String(pk) === String(incoming.sourcePk))) {
     const changed = normalizeHandle(incoming.handle) !== normalizeHandle(cand.handle);
     ev.push(changed ? "소스 PK 동일 · 핸들 변경 추정" : "소스 PK 동일");
     return { score: 1, evidence: ev.join(" · "), deterministic: true, handleChanged: changed };
@@ -194,8 +200,8 @@ export function buildIndex<C extends Candidate>(candidates: C[]): CandidateIndex
   };
   candidates.forEach((c, i) => {
     // 소스별로 키를 나눈다. "pangpang:9306" 과 "ingong:9306" 은 다른 버킷이다.
-    for (const [src, pk] of Object.entries(c.source_pks ?? {})) {
-      if (pk) push(idx.byPk, `${src}:${pk}`, c);
+    for (const [src, pks] of Object.entries(c.source_pks ?? {})) {
+      for (const pk of pks ?? []) if (pk) push(idx.byPk, `${src}:${pk}`, c);
     }
     const h = normalizeHandle(c.handle);
     if (!h) return;
