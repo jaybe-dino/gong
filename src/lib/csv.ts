@@ -35,6 +35,32 @@ export function parseCsv(text: string): string[][] {
   return rows.filter((r) => r.some((c) => c.trim() !== ""));
 }
 
+/**
+ * 원문을 레코드 단위 문자열로 자른다. 따옴표 안의 개행은 자르지 않는다.
+ *
+ * 큰 파일을 청크로 올릴 때 쓴다. 그냥 "\n" 으로 쪼개면 따옴표 안에 개행이 든
+ * 행(주소·후기 같은 자유 텍스트)이 두 조각으로 갈려서 파싱이 어긋난다.
+ * 브라우저와 서버 양쪽에서 쓰므로 이 모듈은 Node 전용 API 를 쓰지 않는다.
+ */
+export function splitRecords(text: string): string[] {
+  const src = text.replace(/^﻿/, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+  const out: string[] = [];
+  let start = 0;
+  let inQuotes = false;
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (ch === '"') {
+      if (inQuotes && src[i + 1] === '"') i++;
+      else inQuotes = !inQuotes;
+    } else if (ch === "\n" && !inQuotes) {
+      out.push(src.slice(start, i));
+      start = i + 1;
+    }
+  }
+  if (start < src.length) out.push(src.slice(start));
+  return out.filter((r) => r.trim() !== "");
+}
+
 export function toObjects(rows: string[][]): { headers: string[]; records: Record<string, string>[] } {
   if (!rows.length) return { headers: [], records: [] };
   const headers = rows[0].map((h) => h.trim());

@@ -2,7 +2,9 @@ import Link from "next/link";
 import Shell from "@/components/Shell";
 import { Card, Empty, Note, Pill, Scroller } from "@/components/ui";
 import { all, one } from "@/lib/db";
-import { commitImport, decideMerge, uploadCsv } from "@/lib/actions";
+import { beginCommit, decideMerge } from "@/lib/actions";
+import Progress from "./Progress";
+import Uploader from "./Uploader";
 import { SOURCES, type SourceKey } from "@/lib/importer";
 import { fmt, SOURCE_FULL } from "@/lib/format";
 
@@ -24,7 +26,7 @@ const ERRORS: Record<string, string> = {
 export default async function ImportPage({
   searchParams,
 }: {
-  searchParams: Promise<{ step?: string; src?: string; batch?: string; err?: string; created?: string; merged?: string; skipped?: string; events?: string }>;
+  searchParams: Promise<{ step?: string; src?: string; batch?: string; err?: string; created?: string; merged?: string; skipped?: string; events?: string; run?: string }>;
 }) {
   const sp = await searchParams;
   const step = [1, 2, 3, 4].includes(Number(sp.step)) ? Number(sp.step) : 1;
@@ -54,7 +56,7 @@ export default async function ImportPage({
         ORDER BY b.observed_at DESC LIMIT 12`),
   ]);
 
-  const link = (n: number) => `/import?step=${n}&src=${src}${batch ? `&batch=${batch.id}` : ""}`;
+  const link = (n: number, s2: string = src) => `/import?step=${n}&src=${s2}${batch ? `&batch=${batch.id}` : ""}`;
   const decided = candidates.filter((c) => c.decision).length;
 
   return (
@@ -71,22 +73,17 @@ export default async function ImportPage({
         {sp.err && <Note tone="stop">{ERRORS[sp.err] ?? "업로드에 실패했습니다."}</Note>}
 
         {step === 1 && (
-          <form action={uploadCsv}>
+          <>
             <div className="srccards" style={{ marginBottom: 16 }}>
               {(Object.keys(SOURCES) as SourceKey[]).map((k) => (
-                <label key={k} className="srccard" aria-pressed={k === src}>
-                  <input type="radio" name="source" value={k} defaultChecked={k === src} style={{ marginRight: 6 }} />
+                <Link key={k} className="srccard" href={link(1, k)} aria-pressed={k === src} scroll={false}>
                   <b style={{ display: "inline" }}>{SOURCES[k].name}</b> <code>{SOURCES[k].site}</code>
                   <p>{SOURCES[k].blurb}</p>
-                </label>
+                </Link>
               ))}
             </div>
 
-            <label className="dropzone">
-              <b>CSV 파일 선택</b>
-              <span>헤더가 있는 UTF-8 CSV. 원문·이미지는 저장하지 않고 파생 지표와 링크백만 보관합니다.</span>
-              <input type="file" name="file" accept=".csv,text/csv" required style={{ marginTop: 12 }} />
-            </label>
+            <Uploader source={src} />
 
             <div style={{ marginTop: 16 }}>
               <Note tone="stop">
@@ -97,13 +94,12 @@ export default async function ImportPage({
             </div>
 
             <div style={{ display: "flex", gap: 8, marginTop: 16, alignItems: "center", flexWrap: "wrap" }}>
-              <button className="btn pri" type="submit">업로드 후 중복 검사 (dry-run)</button>
               <Link className="btn" href={link(2)}>컬럼 매핑 먼저 보기</Link>
               <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
                 테스트용 샘플: <code className="mono">samples/pangpang.csv · ingong.csv · momcal.csv</code>
               </span>
             </div>
-          </form>
+          </>
         )}
 
         {step === 2 && (
@@ -145,6 +141,22 @@ export default async function ImportPage({
         {step === 3 && (
           !batch ? (
             <Card><Empty>분석된 배치가 없습니다. <Link href={link(1)}>1단계</Link>에서 CSV 를 올리세요.</Empty></Card>
+          ) : batch.state === "staging" ? (
+            <Card title="중복 검사 진행" hint={`${SOURCE_FULL[batch.source] ?? batch.source} · ${batch.filename}`}>
+              <div className="card-b">
+                <Progress batchId={batch.id} phase="match" label="기존 모집단과 대조 중" />
+                <p style={{ margin: "10px 0 0", fontSize: 12, color: "var(--ink-3)", lineHeight: 1.7 }}>
+                  소스 PK · 핸들 완전 일치 · 구두점 차이 · 퍼지 점수 순으로 판정합니다.
+                  0.95 이상은 자동 병합, 0.80~0.95 는 검토 큐로 갑니다.
+                </p>
+              </div>
+            </Card>
+          ) : sp.run === "commit" && batch.state !== "committed" ? (
+            <Card title="반영 진행" hint={`${SOURCE_FULL[batch.source] ?? batch.source} · ${batch.filename}`}>
+              <div className="card-b">
+                <Progress batchId={batch.id} phase="commit" label="본 테이블에 반영 중" />
+              </div>
+            </Card>
           ) : (
             <>
               <div className="kpis">
@@ -213,7 +225,7 @@ export default async function ImportPage({
               <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
                 <Link className="btn" href={link(2)}>이전</Link>
                 {batch.state === "committed" ? <Pill tone="k-ok">이미 반영된 배치입니다</Pill> : (
-                  <form action={commitImport}>
+                  <form action={beginCommit}>
                     <input type="hidden" name="batchId" value={batch.id} />
                     <button className="btn pri" type="submit">
                       {fmt(batch.rows_new + batch.rows_merged + decided)}건 반영

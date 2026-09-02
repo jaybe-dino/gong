@@ -2,7 +2,10 @@
  * 크리에이터 중복 판정.
  *
  * 결정론 매칭 우선순위
- *   1. (platform, platform_user_id) — 있으면 무조건 이것
+ *   1. (source, source_pk) — 있으면 무조건 이것. 반드시 같은 소스끼리만 비교한다.
+ *      팡팡의 account_id 9306 과 인공의 uuid 9306 은 다른 사람이다. 예전에는 두 값을
+ *      social_account.platform_user_id 한 칸에 같이 넣고 소스 구분 없이 비교해서,
+ *      번호가 겹치면 엉뚱한 사람으로 병합됐다 (샘플 데이터에서 실제로 발생).
  *   2. 정규화된 handle 완전 일치
  *   3. 구분자 제거 비교 키 일치 (@sooyeon.living vs @sooyeon_living)
  *   4. 퍼지 점수
@@ -38,7 +41,8 @@ export function similarity(a: string | null, b: string | null): number {
 
 export interface Incoming {
   handle?: string | null;
-  platformUserId?: string | null;
+  /** 그 소스 사이트 안에서의 식별자. 소스가 다르면 비교하지 않는다. */
+  sourcePk?: string | null;
   displayName?: string | null;
   followers?: number | null;
   source?: string;
@@ -47,7 +51,8 @@ export interface Incoming {
 export interface Candidate {
   id: string;
   handle: string;
-  platform_user_id?: string | null;
+  /** { pangpang: "9306", ingong: "uuid…" } — source_ref 에서 모은다. */
+  source_pks?: Record<string, string> | null;
   display_name?: string | null;
   followers?: number | null;
 }
@@ -62,12 +67,9 @@ export interface MatchResult {
 export function scoreMatch(incoming: Incoming, cand: Candidate): MatchResult {
   const ev: string[] = [];
 
-  // 1. 소스 PK 동일 — 핸들이 달라도 같은 사람. 핸들 변경 신호.
-  if (
-    incoming.platformUserId &&
-    cand.platform_user_id &&
-    String(incoming.platformUserId) === String(cand.platform_user_id)
-  ) {
+  // 1. 같은 소스의 PK 동일 — 핸들이 달라도 같은 사람. 핸들 변경 신호.
+  const candPk = incoming.source ? cand.source_pks?.[incoming.source] : undefined;
+  if (incoming.sourcePk && candPk && String(incoming.sourcePk) === String(candPk)) {
     const changed = normalizeHandle(incoming.handle) !== normalizeHandle(cand.handle);
     ev.push(changed ? "소스 PK 동일 · 핸들 변경 추정" : "소스 PK 동일");
     return { score: 1, evidence: ev.join(" · "), deterministic: true, handleChanged: changed };
@@ -134,6 +136,152 @@ export function scoreMatch(incoming: Incoming, cand: Candidate): MatchResult {
 
   score = Math.max(0, Math.min(1, score));
   return { score: Number(score.toFixed(2)), evidence: ev.join(" · "), deterministic: false };
+}
+
+/**
+ * 후보 인덱스.
+ *
+ * 전수 비교는 O(n·m) 이다. 1.9만 행을 1.9만 명과 맞추면 3.6억 회 — 측정값 121초였고
+ * 모집단이 커지면 더 길어진다. 서버리스 함수의 실행 시간 제한을 넘는다.
+ *
+ * 그래서 결정론 키는 해시로 바로 찾고, 퍼지 후보만 트라이그램 겹침으로 좁힌다.
+ * scoreMatch 는 핸들 유사도가 0.6 미만이면 0 을 주고 끝낸다 — 0.6 이상이면
+ * 트라이그램이 상당히 겹치므로, 겹침이 없는 후보를 버려도 판정이 달라지지 않는다.
+ */
+export interface CandidateIndex<C extends Candidate> {
+  list: C[];
+  byPk: Map<string, C[]>;
+  byHandle: Map<string, C[]>;
+  byCmp: Map<string, C[]>;
+  byTrigram: Map<string, number[]>;
+}
+
+/** 퍼지 후보로 점수를 매길 최대 개수. 겹침이 많은 순으로 자른다. */
+export const FUZZY_CANDIDATES = 40;
+
+/**
+ * 겹침 비율로 후보를 자르지 않는다.
+ *
+ * 유사도 0.6 이면 편집 거리가 길이의 40% 까지 허용되고, 편집 하나가 트라이그램
+ * 3개를 깨뜨릴 수 있다. 길이 13 짜리 핸들이면 이론상 겹침이 0 까지 내려간다 —
+ * 비율 하한을 두면 진짜 후보를 버린다. 테스트(전수 비교 동등성)가 이걸 잡았다.
+ *
+ * 대신 상위 K 선별을 정렬 없이 한다. 겹침 수는 트라이그램 개수 이하의 작은
+ * 정수라 버킷으로 세면 선형이다.
+ */
+
+function trigrams(key: string | null): string[] {
+  if (!key) return [];
+  const padded = `  ${key} `;
+  const out: string[] = [];
+  for (let i = 0; i + 3 <= padded.length; i++) out.push(padded.slice(i, i + 3));
+  return out;
+}
+
+function push<K, V>(m: Map<K, V[]>, k: K, v: V) {
+  const cur = m.get(k);
+  if (cur) cur.push(v);
+  else m.set(k, [v]);
+}
+
+export function buildIndex<C extends Candidate>(candidates: C[]): CandidateIndex<C> {
+  const idx: CandidateIndex<C> = {
+    list: candidates,
+    byPk: new Map(),
+    byHandle: new Map(),
+    byCmp: new Map(),
+    byTrigram: new Map(),
+  };
+  candidates.forEach((c, i) => {
+    // 소스별로 키를 나눈다. "pangpang:9306" 과 "ingong:9306" 은 다른 버킷이다.
+    for (const [src, pk] of Object.entries(c.source_pks ?? {})) {
+      if (pk) push(idx.byPk, `${src}:${pk}`, c);
+    }
+    const h = normalizeHandle(c.handle);
+    if (!h) return;
+    push(idx.byHandle, h, c);
+    const key = comparisonKey(h);
+    if (!key) return;
+    push(idx.byCmp, key, c);
+    for (const g of new Set(trigrams(key))) push(idx.byTrigram, g, i);
+  });
+  return idx;
+}
+
+export interface BestMatch<C extends Candidate> {
+  cand: C;
+  m: MatchResult;
+}
+
+/**
+ * 인덱스에서 가장 잘 맞는 후보 하나. 없으면 null.
+ *
+ * 단계별로 끊는다. 결정론 키(소스 PK · 핸들 완전 일치)가 맞으면 점수 1.0 이라
+ * 더 나은 후보가 존재할 수 없으므로 즉시 반환하고 퍼지 후보를 아예 만들지 않는다.
+ * 같은 파일을 다시 올리는 흔한 경우가 이 경로로 빠진다 — 트라이그램 겹침 집계는
+ * 행당 수십~수백 후보를 훑기 때문에 이 단축이 크다.
+ */
+export function findBest<C extends Candidate>(
+  idx: CandidateIndex<C>,
+  incoming: Incoming,
+): BestMatch<C> | null {
+  const seen = new Set<C>();
+  // 클로저 안에서 대입하므로 지역 변수로 두면 TS 가 흐름을 못 따라간다.
+  const acc: { best: BestMatch<C> | null } = { best: null };
+  const done = () => (acc.best && acc.best.m.score > 0 ? acc.best : null);
+
+  /** 후보들을 점수 매긴다. 결정론이 나오면 그 즉시 알린다. */
+  const consider = (cs: C[] | undefined): BestMatch<C> | null => {
+    if (!cs) return null;
+    for (const cand of cs) {
+      if (seen.has(cand)) continue;
+      seen.add(cand);
+      const m = scoreMatch(incoming, cand);
+      if (m.deterministic) return { cand, m };
+      if (!acc.best || m.score > acc.best.m.score) acc.best = { cand, m };
+    }
+    return null;
+  };
+
+  if (incoming.sourcePk && incoming.source) {
+    const hit = consider(idx.byPk.get(`${incoming.source}:${incoming.sourcePk}`));
+    if (hit) return hit;
+  }
+
+  const h = normalizeHandle(incoming.handle);
+  if (!h) return done();
+
+  const exact = consider(idx.byHandle.get(h));
+  if (exact) return exact;
+
+  const key = comparisonKey(h);
+  if (!key) return done();
+
+  const punct = consider(idx.byCmp.get(key));
+  if (punct) return punct;
+
+  // 여기까지 왔으면 결정론 키가 없다. 트라이그램 겹침 상위 후보만 점수를 매긴다.
+  const grams = new Set(trigrams(key));
+  const overlap = new Map<number, number>();
+  for (const g of grams) {
+    const ids = idx.byTrigram.get(g);
+    if (!ids) continue;
+    for (const i of ids) overlap.set(i, (overlap.get(i) ?? 0) + 1);
+  }
+  // 겹침 수별 버킷 → 많은 쪽부터 K 개. 전체 정렬을 피한다.
+  const buckets: number[][] = [];
+  for (const [i, n] of overlap) (buckets[n] ??= []).push(i);
+  const top: C[] = [];
+  for (let n = buckets.length - 1; n >= 1 && top.length < FUZZY_CANDIDATES; n--) {
+    for (const i of buckets[n] ?? []) {
+      top.push(idx.list[i]);
+      if (top.length >= FUZZY_CANDIDATES) break;
+    }
+  }
+  const fuzzy = consider(top);
+  if (fuzzy) return fuzzy;
+
+  return done();
 }
 
 export type Verdict = "merge" | "review" | "new";

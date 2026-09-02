@@ -28,7 +28,7 @@ before(async () => {
 
 const { all, one, run, pool } = await import("../src/lib/db.ts");
 const { loadCreators, defaultCampaign, channelPolicies, suppressions } = await import("../src/lib/queries.ts");
-const { analyzeCsv, commitBatch, inferHandleColumn, normalizeRow } = await import("../src/lib/importer.ts");
+const { analyzeCsv, commitBatch, matchBatch, stageCsv, inferHandleColumn, normalizeRow } = await import("../src/lib/importer.ts");
 const { loadCampaignInfo, loadGateInputs, loadSendCandidates, evaluateCandidate } = await import("../src/lib/outreach.ts");
 
 after(async () => { await pool().end(); });
@@ -213,7 +213,12 @@ test("임포트 커밋 — 신규는 생성하고 스냅샷을 쌓는다", async
 
   const batch = await one<{ state: string }>(`SELECT state FROM import_batch WHERE id=$1`, [batchId]);
   assert.equal(batch!.state, "committed");
-  await assert.rejects(commitBatch(batchId, JAY), /이미 반영/);
+
+  // 커밋은 여러 요청에 나눠 돌므로 다시 불러도 안전해야 한다 — 화면이 done 까지 폴링한다.
+  const again = await commitBatch(batchId, JAY);
+  assert.equal(again.done, true);
+  assert.equal(again.created + again.merged, 0, "이미 반영된 행을 두 번 넣지 않는다");
+  assert.equal(await n("creator"), beforeCreators + res.created, "재호출이 크리에이터를 늘리지 않는다");
 });
 
 test("임포트 — 핸들 없는 행은 오류로 넘기고 저장하지 않는다", async () => {
@@ -228,16 +233,18 @@ test("임포트 — 핸들 없는 행은 오류로 넘기고 저장하지 않는
 test("임포트 — 맘캘 슬러그만 있는 행은 오류로 넘어간다", async () => {
   const csv = "slug,seller,brand\nde-elisa-shop,엘리사샵,라누보\n";
   const batchId = (await analyzeCsv(csv, "momcal", "slug.csv", JAY))!;
-  const b = await one<{ rows_error: number; report: { rows: { evidence: string }[] } }>(
+  const b = await one<{ rows_error: number; report: { preview: { evidence: string }[] } }>(
     `SELECT rows_error, report FROM import_batch WHERE id=$1`, [batchId]);
   assert.equal(b!.rows_error, 1);
-  assert.match(b!.report.rows[0].evidence, /매칭 키로 지정/);
+  assert.match(b!.report.preview[0].evidence, /매칭 키로 지정/);
 });
 
 test("임포트 — 소스 PK 가 같고 핸들이 다르면 검토 큐로 가고 alias 가 남는다", async () => {
-  // pangpang 시드는 account_id 를 platform_user_id 로 갖고 있다.
+  // 매칭 키는 (source, source_pk) 다 — source_ref 에서 팡팡 소스인 계정을 하나 집는다.
   const acc = await one<{ handle: string; pid: string }>(
-    `SELECT handle, platform_user_id AS pid FROM social_account WHERE platform_user_id IS NOT NULL LIMIT 1`);
+    `SELECT sa.handle, sr.source_pk AS pid
+       FROM source_ref sr JOIN social_account sa ON sa.creator_id = sr.entity_id
+      WHERE sr.entity='creator' AND sr.source='pangpang' LIMIT 1`);
   const csv = `handle,display_name,팔로워,account_id\n@renamed_${acc!.pid},바뀐이름,5만,${acc!.pid}\n`;
   const batchId = (await analyzeCsv(csv, "pangpang", "rename.csv", JAY))!;
 
@@ -524,4 +531,77 @@ test("변화 감지 — 경쟁 브랜드 공구가 열리면 진행 중 타깃�
     `SELECT count(*) AS n FROM audit_log WHERE entity='campaign_member' AND entity_id=$1 AND action='auto_exclude'`,
     [m!.id]);
   assert.ok(Number(audit!.n) > 0);
+});
+
+// ---------- 임포트 확장성 ----------
+
+test("임포트 — 2,000행을 넘겨도 한 행도 잃지 않는다", async () => {
+  // 회귀: 분석 결과를 import_batch.report(jsonb) 에 2,000행만 담고 commitBatch 가
+  // 그 report 를 순회했다. 1.9만 행을 올리면 1.7만 행이 조용히 사라졌다.
+  const N = 2500;
+  const lines = ["handle,display_name,account_id,팔로워"];
+  for (let i = 0; i < N; i++) lines.push(`bulk_row_${i},대량${i},7${String(i).padStart(6, "0")},${1 + (i % 40)}만`);
+  const csv = lines.join("\n");
+
+  const batchId = (await analyzeCsv(csv, "pangpang", "bulk.csv", JAY))!;
+  const rowCount = await one<{ n: number }>(`SELECT count(*)::int AS n FROM import_row WHERE batch_id=$1`, [batchId]);
+  assert.equal(rowCount!.n, N, "분석 행이 전부 담겨야 한다");
+
+  const before = await n("creator");
+  let created = 0;
+  for (let guard = 0; guard < 20; guard++) {
+    const r = await commitBatch(batchId, JAY, { limit: 700 });
+    created += r.created;
+    if (r.done) break;
+  }
+  assert.equal(created, N, `${N}행 전부 반영돼야 한다`);
+  assert.equal(await n("creator"), before + N);
+});
+
+test("임포트 — 담기와 대조가 나뉘고 청크로 이어진다", async () => {
+  const N = 300;
+  const lines = ["handle,display_name,account_id,팔로워"];
+  for (let i = 0; i < N; i++) lines.push(`chunked_${i},청크${i},8${String(i).padStart(6, "0")},3만`);
+
+  const batchId = (await stageCsv(lines.join("\n"), "pangpang", "chunk.csv", JAY))!;
+  const staged = await one<{ state: string; unmatched: number }>(
+    `SELECT b.state, (SELECT count(*)::int FROM import_row r WHERE r.batch_id=b.id AND r.verdict='unmatched') AS unmatched
+       FROM import_batch b WHERE b.id=$1`, [batchId]);
+  assert.equal(staged!.state, "staging", "담기 직후에는 아직 대조 전이다");
+  assert.equal(staged!.unmatched, N);
+
+  const first = await matchBatch(batchId, { limit: 100 });
+  assert.equal(first.done, false);
+  assert.equal(first.remaining, N - 100);
+
+  for (let guard = 0; guard < 10; guard++) {
+    if ((await matchBatch(batchId, { limit: 100 })).done) break;
+  }
+  const after = await one<{ state: string; rows_new: number }>(
+    `SELECT state, rows_new FROM import_batch WHERE id=$1`, [batchId]);
+  assert.equal(after!.state, "dry_run");
+  assert.equal(after!.rows_new, N);
+});
+
+test("임포트 — 검토 미결정 행은 보류되고 결정 후 반영된다", async () => {
+  const acc = await one<{ handle: string; pid: string }>(
+    `SELECT sa.handle, sr.source_pk AS pid
+       FROM source_ref sr JOIN social_account sa ON sa.creator_id = sr.entity_id
+      WHERE sr.entity='creator' AND sr.source='pangpang' LIMIT 1`);
+  const csv = `handle,display_name,팔로워,account_id\n@defer_${acc!.pid},보류대상,5만,${acc!.pid}\n`;
+  const batchId = (await analyzeCsv(csv, "pangpang", "defer.csv", JAY))!;
+
+  const r1 = await commitBatch(batchId, JAY);
+  assert.equal(r1.deferred, 1, "결정 전에는 보류돼야 한다");
+  assert.equal(r1.created + r1.merged, 0);
+  assert.equal(r1.done, true, "보류 행이 남아도 진행은 끝나야 한다 (무한 반복 방지)");
+
+  const st = await one<{ state: string }>(`SELECT state FROM import_row WHERE batch_id=$1`, [batchId]);
+  assert.equal(st!.state, "deferred");
+
+  await run(`UPDATE merge_candidate SET decision='merge' WHERE batch_id=$1`, [batchId]);
+  const { reopenDecided } = await import("../src/lib/importer.ts");
+  assert.equal(await reopenDecided(batchId), 1, "결정된 행은 다시 대기로 돌아온다");
+  const r2 = await commitBatch(batchId, JAY);
+  assert.equal(r2.merged, 1);
 });

@@ -11,7 +11,7 @@ import { detectChanges } from "./jobs/detect-changes";
 import { gmail } from "./channels";
 import { interestEffects, INTEREST, ENGINE } from "./states";
 import { parseReturnDate } from "./parse";
-import { analyzeCsv, commitBatch, SOURCES, type SourceKey } from "./importer";
+import { batchProgress, beginStage, commitBatch, endStage, matchBatch, reopenDecided, stageRows, SOURCES, type SourceKey } from "./importer";
 
 const JAY = "00000000-0000-0000-0000-0000000000aa";
 
@@ -220,18 +220,83 @@ export async function startSend(formData: FormData) {
 
 // ---------- 임포트 ----------
 
-export async function uploadCsv(formData: FormData) {
-  const source = String(formData.get("source") ?? "pangpang") as SourceKey;
-  const file = formData.get("file");
-  if (!(file instanceof File) || file.size === 0) redirect("/import?step=1&err=nofile");
-  if (!SOURCES[source]) redirect("/import?step=1&err=badsource");
+/**
+ * 업로드는 청크로 받는다.
+ *
+ * 예전에는 File 을 서버 액션 하나로 넘겼다. Next 의 기본 본문 한도가 1 MB 라
+ * 1.9만 행(2.8 MB) 파일이 413 으로 튕겼고, 화면에는 원인이 안 보이는
+ * "Server Components render" 오류만 떴다. Vercel 은 요청 본문을 4.5 MB 로
+ * 막으니 한도를 올리는 것만으로는 곧 또 막힌다.
+ */
+export async function beginUpload(source: string, filename: string, headerLine: string): Promise<string> {
+  const src = source as SourceKey;
+  if (!SOURCES[src]) throw new Error("알 수 없는 소스입니다");
+  const id = await beginStage(src, filename, JAY, headerLine);
+  if (!id) throw new Error("헤더를 읽을 수 없습니다");
+  return id;
+}
 
-  const text = await (file as File).text();
-  const batchId = await analyzeCsv(text, source, (file as File).name, JAY);
-  if (!batchId) redirect("/import?step=1&err=empty");
+export async function uploadChunk(
+  batchId: string,
+  headerLine: string,
+  records: string[],
+  startLine: number,
+): Promise<number> {
+  return await stageRows(batchId, headerLine, records, startLine);
+}
 
+export async function endUpload(batchId: string): Promise<number> {
+  const n = await endStage(batchId);
   revalidatePath("/import");
-  redirect(`/import?step=3&batch=${batchId}`);
+  return n;
+}
+
+export interface StepResult {
+  done: boolean;
+  processed: number;
+  total: number;
+  remaining: number;
+  note?: string;
+}
+
+/** 2단계 한 청크. 화면이 done 이 될 때까지 반복 호출한다. */
+export async function matchStep(batchId: string): Promise<StepResult> {
+  const r = await matchBatch(batchId);
+  const p = await batchProgress(batchId);
+  const total = p?.total ?? 0;
+  return { done: r.done, total, remaining: r.remaining, processed: total - r.remaining };
+}
+
+/** 3단계 한 청크. 결정이 끝난 검토 행을 먼저 대기로 되돌린다. */
+export async function commitStep(batchId: string): Promise<StepResult> {
+  await reopenDecided(batchId);
+  const r = await commitBatch(batchId, JAY);
+  const p = await batchProgress(batchId);
+  const total = p?.total ?? 0;
+  const left = (p?.pending ?? 0) + (p?.deferred ?? 0);
+  return {
+    done: r.done,
+    total,
+    remaining: r.remaining,
+    processed: (p?.applied ?? 0) + (p?.skipped ?? 0),
+    note: r.deferred > 0 ? `검토 대기 ${left}건은 결정 후 반영됩니다` : undefined,
+  };
+}
+
+/**
+ * 커밋이 끝난 뒤 델타를 뽑는다.
+ *
+ * 커밋을 여러 요청에 나눠 하므로 변화 감지는 마지막에 한 번만 돈다.
+ * 매 청크마다 돌면 같은 이벤트가 중복 생성된다.
+ */
+export async function finalizeImport(batchId: string): Promise<{ events: number; excluded: number }> {
+  const b = await one<{ created_at: string }>(`SELECT created_at FROM import_batch WHERE id=$1`, [batchId]);
+  const since = b ? new Date(b.created_at) : new Date(Date.now() - 3600_000);
+  const delta = await detectChanges({ batchId, since });
+  revalidatePath("/import");
+  revalidatePath("/influencers");
+  revalidatePath("/watch");
+  return { events: delta.events.length, excluded: delta.autoExcluded };
 }
 
 export async function decideMerge(formData: FormData) {
@@ -242,20 +307,12 @@ export async function decideMerge(formData: FormData) {
   revalidatePath("/import");
 }
 
-export async function commitImport(formData: FormData) {
+/** 커밋 시작 — 화면의 진행 컴포넌트가 commitStep 을 이어 돌린다. */
+export async function beginCommit(formData: FormData) {
   const batchId = String(formData.get("batchId") ?? "");
   if (!batchId) return;
-
-  // 커밋 시각을 기준으로 잡아야 이번 배치가 만든 것만 델타로 잡힌다.
-  const since = new Date();
-  const res = await commitBatch(batchId, JAY);
-  // 델타를 뽑고 그대로 아웃리치 동작으로 연결한다 (브랜드 충돌 → 타깃 자동 제외).
-  const delta = await detectChanges({ batchId, since });
+  await reopenDecided(batchId);
   revalidatePath("/import");
-  revalidatePath("/influencers");
-  revalidatePath("/watch");
-  redirect(
-    `/import?step=4&batch=${batchId}&created=${res.created}&merged=${res.merged}` +
-    `&skipped=${res.skipped}&events=${delta.events.length}&excluded=${delta.autoExcluded}`,
-  );
+  redirect(`/import?step=3&batch=${batchId}&run=commit`);
 }
+

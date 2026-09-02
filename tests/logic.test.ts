@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+// 타입 전용 import 는 실행 시 제거된다. 동적 import 로 받은 D 는 값이라 타입에 못 쓴다.
+import type { Incoming, MatchResult } from "../src/lib/dedupe.ts";
 
 const H = await import("../src/lib/handle.ts");
 const P = await import("../src/lib/parse.ts");
@@ -103,14 +105,31 @@ test("CSV 파서 — 따옴표 안의 쉼표·개행·이스케이프", () => {
 
 // ---------- 중복 판정 ----------
 
-test("소스 PK 가 같으면 핸들이 달라도 같은 사람 — 핸들 변경 신호", () => {
+test("같은 소스의 PK 가 같으면 핸들이 달라도 같은 사람 — 핸들 변경 신호", () => {
   const m = D.scoreMatch(
-    { handle: "joo0.is.happy", platformUserId: "9306", displayName: "주영이네" },
-    { id: "x", handle: "hi.iamjoo0", platform_user_id: "9306", display_name: "주영이네" },
+    { handle: "joo0.is.happy", sourcePk: "9306", source: "pangpang", displayName: "주영이네" },
+    { id: "x", handle: "hi.iamjoo0", source_pks: { pangpang: "9306" }, display_name: "주영이네" },
   );
   assert.equal(m.score, 1);
   assert.equal(m.deterministic, true);
   assert.equal(m.handleChanged, true);
+});
+
+test("소스가 다르면 PK 번호가 겹쳐도 같은 사람이 아니다", () => {
+  // 팡팡의 account_id 9306 과 인공의 uuid 9306 은 서로 무관한 번호다.
+  // 예전에는 두 값을 한 칸에 넣고 소스 구분 없이 비교해 엉뚱한 병합이 났다.
+  const m = D.scoreMatch(
+    { handle: "aaa.bbb", sourcePk: "9306", source: "ingong", displayName: "가나다" },
+    { id: "x", handle: "zzz.qqq", source_pks: { pangpang: "9306" }, display_name: "하마루" },
+  );
+  assert.equal(m.deterministic, false);
+  assert.equal(m.score, 0, "핸들도 다르니 후보가 아니다");
+
+  const idx = D.buildIndex([
+    { id: "p", handle: "zzz.qqq", source_pks: { pangpang: "9306" }, display_name: "하마루" },
+  ]);
+  assert.equal(D.findBest(idx, { handle: "aaa.bbb", sourcePk: "9306", source: "ingong" }), null);
+  assert.ok(D.findBest(idx, { handle: "aaa.bbb", sourcePk: "9306", source: "pangpang" }), "같은 소스면 잡는다");
 });
 
 test("구두점만 다르면 병합 후보, 표시명이 다르면 검토로 내려간다", () => {
@@ -377,4 +396,120 @@ test("상시 공구는 D-DAY 집계와 슬롯 계산에서 빠진다", () => {
   assert.equal(occupiesSlot(live, "2026-09-03"), true);
   assert.equal(dday(live, "2026-09-07").label, "오늘 마감");
   assert.equal(dday(live, "2026-09-04").label, "D-3");
+});
+
+// ---------- 중복 판정 인덱스 ----------
+
+/** 결정론 난수. 테스트가 돌 때마다 다른 모집단을 보면 실패를 재현할 수 없다. */
+function prng(seed: number) {
+  let s = seed >>> 0;
+  return () => {
+    s = (s + 0x6d2b79f5) >>> 0;
+    let t = Math.imul(s ^ (s >>> 15), 1 | s);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+function population(n: number, seed = 7) {
+  const r = prng(seed);
+  const p = (a: string[]) => a[Math.floor(r() * a.length)];
+  const A = ["sooyeon", "mom", "baby", "living", "kitchen", "haru", "jinny", "nara", "dabin", "hyun"];
+  const B = ["living", "diary", "note", "room", "table", "log", "pick", "shop", "market"];
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const h = `${p(A)}${p([".", "_", ""])}${p(B)}${i}`;
+    out.push({
+      id: `c${i}`,
+      handle: h,
+      source_pks: { pangpang: String(900000 + i) },
+      display_name: `${p(A)}맘`,
+      followers: Math.floor(r() * 300000) + 3000,
+    });
+  }
+  return out;
+}
+
+/** 인덱스 도입 전의 방식 — 후보 전체를 훑는다. */
+function bruteForce(cands: ReturnType<typeof population>, incoming: Incoming) {
+  let best: { cand: (typeof cands)[number]; m: MatchResult } | null = null;
+  for (const cand of cands) {
+    const m = D.scoreMatch(incoming, cand);
+    if (!best || m.score > best.m.score) best = { cand, m };
+    if (m.deterministic) break;
+  }
+  return best && best.m.score > 0 ? best : null;
+}
+
+test("중복 판정 인덱스 — 전수 비교와 같은 판정을 낸다", () => {
+  const cands = population(2000);
+  const idx = D.buildIndex(cands);
+  const r = prng(99);
+
+  const probes: Incoming[] = [];
+  for (let i = 0; i < 400; i++) {
+    const c = cands[Math.floor(r() * cands.length)];
+    const kind = Math.floor(r() * 5);
+    if (kind === 0) {
+      // 소스 PK 동일 · 핸들 변경
+      probes.push({ sourcePk: c.source_pks.pangpang, source: "pangpang", handle: `${c.handle}_new`, displayName: c.display_name, followers: c.followers });
+    } else if (kind === 1) {
+      probes.push({ handle: c.handle, displayName: c.display_name, followers: c.followers });
+    } else if (kind === 2) {
+      // 구분자만 다름
+      probes.push({ handle: c.handle.replace(/[._]/g, (m) => (m === "." ? "_" : ".")), displayName: c.display_name, followers: c.followers });
+    } else if (kind === 3) {
+      // 오타 — 1~4글자. 유사도 0.6~0.95 구간을 훑어 트라이그램 하한이 진짜 후보를
+      // 버리지 않는지 본다.
+      const edits = 1 + Math.floor(r() * 4);
+      let h = c.handle;
+      for (let e = 0; e < edits; e++) {
+        const at = Math.floor(r() * h.length);
+        h = h.slice(0, at) + "xqzv"[e % 4] + h.slice(at + 1);
+      }
+      probes.push({ handle: h, displayName: c.display_name, followers: c.followers });
+    } else {
+      probes.push({ handle: `zzz_unrelated_${i}`, displayName: "무관한맘", followers: 12345 });
+    }
+  }
+
+  let matched = 0;
+  for (const p of probes) {
+    const fast = D.findBest(idx, p);
+    const slow = bruteForce(cands, p);
+    const fv = fast ? D.decide(fast.m.score, fast.m.deterministic) : "new";
+    const sv = slow ? D.decide(slow.m.score, slow.m.deterministic) : "new";
+    assert.equal(fv, sv, `판정 불일치: ${p.handle} — 인덱스 ${fv} vs 전수 ${sv}`);
+    if (fast && slow) {
+      assert.equal(fast.m.score, slow.m.score, `점수 불일치: ${p.handle}`);
+      assert.equal(fast.m.handleChanged ?? false, slow.m.handleChanged ?? false, `핸들변경 플래그 불일치: ${p.handle}`);
+    }
+    if (fv !== "new") matched++;
+  }
+  assert.ok(matched > 200, `매칭이 너무 적다 (${matched}건) — 테스트가 무의미해졌다`);
+});
+
+test("중복 판정 인덱스 — 전수 비교보다 확연히 빠르다", () => {
+  const cands = population(3000, 21);
+  const idx = D.buildIndex(cands);
+  const probes = population(300, 55).map((c) => ({ handle: c.handle, displayName: c.display_name, followers: c.followers }));
+
+  let t = Date.now();
+  for (const p of probes) D.findBest(idx, p);
+  const fast = Date.now() - t;
+
+  t = Date.now();
+  for (const p of probes) bruteForce(cands, p);
+  const slow = Date.now() - t;
+
+  assert.ok(fast * 5 < slow, `인덱스 ${fast}ms vs 전수 ${slow}ms — 기대한 만큼 빠르지 않다`);
+});
+
+test("CSV 레코드 분할 — 따옴표 안의 개행은 자르지 않는다", async () => {
+  const { splitRecords } = await import("../src/lib/csv.ts");
+  const recs = splitRecords('a,b\n1,"줄1\n줄2"\n2,평범\n');
+  assert.equal(recs.length, 3, JSON.stringify(recs));
+  assert.equal(recs[1], '1,"줄1\n줄2"');
+  // 이스케이프된 따옴표가 상태를 뒤집지 않아야 한다
+  assert.equal(splitRecords('h\n"그는 ""안녕"" 이라 했다"\n뒤행').length, 3);
 });
