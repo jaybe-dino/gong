@@ -10,18 +10,23 @@ import crypto from "node:crypto";
 import pg from "pg";
 import { CREATORS, BRANDS, DEALS, CAMPAIGNS, THREADS, TASKS, EVENTS, IMPORT_HISTORY, REVIEW_ROWS, TODAY } from "./seed-data.mjs";
 
+/**
+ * 데모 데이터를 적재한다. 이미 시드된 DB 에서는 force 없이는 아무것도 하지 않는다.
+ * CLI(`npm run db:seed`)와 배포 후 초기화 라우트가 같은 함수를 쓴다.
+ */
+export async function seed(opts = {}) {
+  const force = opts.force ?? false;
 const url = process.env.DATABASE_URL ?? process.env.POSTGRES_URL ?? "postgres://postgres@127.0.0.1:5433/gong";
 const ssl = /neon\.tech|vercel-storage|supabase|sslmode=require/.test(url) ? { rejectUnauthorized: false } : undefined;
 const db = new pg.Client({ connectionString: url, ssl });
 await db.connect();
 
 const existing = (await db.query("SELECT count(*)::int n FROM creator")).rows[0].n;
-if (existing > 0 && !process.argv.includes("--force")) {
-  console.log(`[seed] 이미 시드됨 (creator ${existing}건). --force 로 재생성.`);
+if (existing > 0 && !force) {
   await db.end();
-  process.exit(0);
+  return { skipped: true, creator: existing };
 }
-if (process.argv.includes("--force")) {
+if (force) {
   await db.query(`TRUNCATE creator, brand, deal, campaign, import_batch, change_event, message,
                   outreach_task, campaign_member, suppression, source_ref, audit_log, gate_block RESTART IDENTITY CASCADE`);
 }
@@ -445,8 +450,23 @@ await insertMany("merge_candidate", ["batch_id","incoming","candidate_id","score
   REVIEW_ROWS.map((r) => [pendingBatch, JSON.stringify({ handle: r.handle, match: r.match }),
     byHandle[r.match]?.creatorId ?? null, r.score, r.reason, "pending"]));
 
-const n = async (t) => (await db.query(`SELECT count(*)::int n FROM ${t}`)).rows[0].n;
-console.log(`[seed] creator ${await n("creator")} · account ${await n("social_account")} · deal ${await n("deal")}`);
-console.log(`[seed] member ${await n("campaign_member")} · message ${await n("message")} · task ${await n("outreach_task")}`);
-console.log(`[seed] suppression ${await n("suppression")} · change_event ${await n("change_event")}`);
-await db.end();
+  const n = async (t) => (await db.query(`SELECT count(*)::int n FROM ${t}`)).rows[0].n;
+  const counts = {};
+  for (const t of ["creator", "social_account", "deal", "campaign_member", "message", "outreach_task", "suppression", "change_event"]) {
+    counts[t] = await n(t);
+  }
+  await db.end();
+  return counts;
+}
+
+
+// 직접 실행됐을 때만 CLI 로 동작한다. 라우트에서 import 할 때는 실행되지 않는다.
+if (import.meta.url === `file://${process.argv[1]}`) {
+  const r = await seed({ force: process.argv.includes("--force") });
+  if (r.skipped) console.log(`[seed] 이미 시드됨 (creator ${r.creator}건). --force 로 재생성.`);
+  else {
+    console.log(`[seed] creator ${r.creator} · account ${r.social_account} · deal ${r.deal}`);
+    console.log(`[seed] member ${r.campaign_member} · message ${r.message} · task ${r.outreach_task}`);
+    console.log(`[seed] suppression ${r.suppression} · change_event ${r.change_event}`);
+  }
+}

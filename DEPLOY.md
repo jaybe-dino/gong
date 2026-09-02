@@ -37,7 +37,7 @@ Settings → Environment Variables. Production 에 넣는다.
 | `DATABASE_URL` | 1단계의 풀러 문자열 | 필수 |
 | `PGPOOL_MAX` | `5` | 인스턴스당 커넥션 |
 | `UNSUB_BASE_URL` | `https://<배포도메인>/u` | 첫 배포 후 도메인 확정되면 채운다 |
-| `CRON_SECRET` | `openssl rand -hex 32` 결과 | 크론 엔드포인트 Bearer |
+| `CRON_SECRET` | `openssl rand -hex 32` 결과 | 크론·초기화 엔드포인트 Bearer. **반드시 설정** |
 | `MAIL_BASE_ADDRESS` | `partner@dinostudio.kr` | Reply-To 플러스 주소의 기준 |
 | `MAIL_ORG_NAME` | `Dinostudio (주)` | 메일 푸터 |
 | `MAIL_POSTAL` | 사업장 주소 | 정보통신망법상 필수 |
@@ -50,16 +50,51 @@ Settings → Environment Variables. Production 에 넣는다.
 
 ## 4. DB 스키마 + 시드
 
-로컬에서 프로덕션 DB를 향해 한 번만 실행한다.
+서버리스에는 셸이 없어서 프로덕션에서 `npm run db:setup` 을 돌릴 수 없다.
+그래서 앱 자신이 스키마를 적재하는 엔드포인트를 둔다. **로컬 터미널이 필요 없다.**
+
+`CRON_SECRET` 으로 보호되며, 브라우저 주소창으로는 실행되지 않는다(POST 전용).
+
+```bash
+S='설정한 CRON_SECRET'
+D='https://<배포도메인>'
+
+curl -X POST -H "Authorization: Bearer $S" $D/api/admin/setup
+# {"ok":true,"ms":152,"applied":["001_schema.sql","002_seed_policy.sql"],"tables":34}
+
+curl -X POST -H "Authorization: Bearer $S" $D/api/admin/seed
+# {"ok":true,"ms":855,"creator":1742,"deal":5258,"campaign_member":342, ...}
+```
+
+두 엔드포인트 모두 **두 번 호출해도 안전**하다. 이미 있으면 손대지 않고 물러난다.
+
+```
+setup 재실행 → {"ok":true,"skipped":true,"tables":34}
+seed  재실행 → {"ok":true,"skipped":true,"creator":1742}
+```
+
+갈아엎어야 할 때만 명시적으로:
+
+| 요청 | 동작 |
+|---|---|
+| `POST /api/admin/setup?drop=1` | public 스키마 재생성. **데이터 전부 삭제** |
+| `POST /api/admin/seed?force=1` | 데이터 테이블 TRUNCATE 후 재적재 (정책 시드는 유지) |
+
+시드 없이 빈 DB로 운영하려면 `setup` 만 호출한다. 정책·템플릿·파이프라인 단계는
+`002_seed_policy.sql` 에 들어 있어서 `setup` 만으로도 앱이 동작한다.
+
+`001_schema.sql` 은 `CREATE TABLE IF NOT EXISTS` 를 쓰지 않는다(제약과 인덱스까지
+조건부로 만들면 스키마가 읽기 어려워진다). 대신 위의 가드로 재실행을 막는다.
+
+### 로컬에서 하고 싶다면
 
 ```bash
 export DATABASE_URL='postgres://...-pooler.../DB?sslmode=require'
-npm run db:setup          # 34개 테이블 + 정책 시드
-npm run db:seed           # 크리에이터 1,742 / 공구 5,258 / 캠페인 멤버 342
+npm run db:setup
+npm run db:seed
 ```
 
-시드 없이 빈 DB로 띄우려면 `db:setup` 만 돌린다.
-`db:setup --drop` 은 public 스키마를 통째로 재생성한다. 프로덕션에서는 주의.
+CLI 와 엔드포인트는 같은 함수를 호출한다. 결과가 다르지 않다.
 
 ## 5. 크론 확인
 
@@ -85,6 +120,7 @@ Hobby 플랜은 크론이 하루 1회로 제한된다. 10분 주기를 쓰려면
 - [ ] `/u/<발급된토큰>` GET 이 확인 페이지를 띄우는가
 - [ ] 없는 토큰도 200 을 주는가 (열거 방지)
 - [ ] 크론 잡이 Settings 에 보이는가
+- [ ] `/api/admin/setup` 을 인증 없이 POST 하면 401 인가
 
 ## CLI 로 배포하려면
 

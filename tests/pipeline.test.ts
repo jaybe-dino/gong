@@ -319,8 +319,9 @@ test("시퀀스 워커 — 발송하고 다음 스텝을 업무시간 안으로 
       RETURNING id`);
   assert.ok(m, "대상이 있어야 한다");
 
-  // 다른 대상이 섞이지 않도록 이 건만 지금 만기로 둔다
-  await run(`UPDATE campaign_member SET next_action_at = next_action_at + interval '1 day'
+  // 다른 대상이 섞이지 않도록 이 건만 지금 만기로 둔다.
+  // 상대 가산(+1 day)은 안 된다 — 시드에는 며칠 전으로 밀린 건도 있어서 여전히 만기로 남는다.
+  await run(`UPDATE campaign_member SET next_action_at = now() + interval '1 day'
               WHERE id <> $1 AND next_action_at IS NOT NULL AND next_action_at <= now()`, [m!.id]);
 
   const before = await n("message");
@@ -343,7 +344,7 @@ test("시퀀스 워커 — 전 스텝을 소진하면 무응답으로 종결한�
   const m = await one<{ id: string }>(
     `UPDATE campaign_member SET next_action_at = now() - interval '1 minute', engine_state = 3, current_step = 99
       WHERE id = (SELECT id FROM campaign_member WHERE engine_state > 0 LIMIT 1) RETURNING id`);
-  await run(`UPDATE campaign_member SET next_action_at = next_action_at + interval '1 day'
+  await run(`UPDATE campaign_member SET next_action_at = now() + interval '1 day'
               WHERE id <> $1 AND next_action_at IS NOT NULL AND next_action_at <= now()`, [m!.id]);
   await seq.tick({ limit: 50 });
   const after = await one<{ engine_state: number; next_action_at: string | null }>(
@@ -360,7 +361,7 @@ test("시퀀스 워커 — 수신거부 대상은 종결시키고 사유를 남�
              VALUES ('creator_id',$1,'{}','dnc_request') ON CONFLICT DO NOTHING`, [target!.creator_id]);
   await run(`UPDATE campaign_member SET engine_state=1, current_step=0, next_action_at=now() - interval '1 minute'
               WHERE id=$1`, [target!.id]);
-  await run(`UPDATE campaign_member SET next_action_at = next_action_at + interval '1 day'
+  await run(`UPDATE campaign_member SET next_action_at = now() + interval '1 day'
               WHERE id <> $1 AND next_action_at IS NOT NULL AND next_action_at <= now()`, [target!.id]);
 
   const beforeBlocks = await n("gate_block");
