@@ -395,7 +395,7 @@ for (const q of queueTargets) {
   const acc = byHandle[q.handle];
   if (!acc) continue;
   const id = uid();
-  extraMembers.push([id, q.camp, acc.creatorId, stageIds["contacted"], ENGINE.QUEUED, 0, SEQ, 1,
+  extraMembers.push([id, q.camp, acc.creatorId, stageIds["qualified"], ENGINE.QUEUED, 0, SEQ, 0,
     `${TODAY} 12:00+09`, JAY, null, null, `cm_${id.slice(0, 8)}`, null, null, null, null, null, null, null, 0]);
   memberByHandle[q.handle] = id;
 }

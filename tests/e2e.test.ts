@@ -38,7 +38,7 @@ let server: ChildProcess;
 let browser: Browser;
 let page: Page;
 
-const { one, pool } = await import("../src/lib/db.ts");
+const { one, all, pool } = await import("../src/lib/db.ts");
 
 /** 서버 액션 폼 제출 후 응답과 후속 렌더까지 기다린다. */
 async function submit(locator: ReturnType<Page["locator"]>) {
@@ -299,6 +299,50 @@ describe("아웃리치 콘솔 E2E", () => {
     await page.getByLabel("다음").click();
     await page.waitForURL(new RegExp(`d=${expected}`), { timeout: 15000 });
     assert.match(page.url(), new RegExp(`d=${expected}`));
+  });
+
+  test("원클릭 수신거부 — GET 은 확인만, POST 가 실제로 차단한다", async () => {
+    // 모든 발송 메일이 이 URL 을 List-Unsubscribe 헤더로 달고 나간다. 404 면 §50② 회피가 된다.
+    const m = await one<{ token: string; creator_id: string; display_name: string }>(
+      `SELECT replace(cm.reply_token,'cm_','') AS token, cm.creator_id, c.display_name
+         FROM campaign_member cm JOIN creator c ON c.id = cm.creator_id
+        WHERE cm.reply_token IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM suppression s
+                           WHERE s.identifier_type='creator_id' AND s.identifier_val = cm.creator_id::text)
+        LIMIT 1`);
+    assert.ok(m, "수신거부 토큰을 가진 대상이 있어야 한다");
+
+    const n = async (sql: string, p: unknown[] = []) => Number((await one<{ n: string }>(sql, p))!.n);
+    const before = await n(`SELECT count(*) AS n FROM suppression WHERE identifier_val=$1::text`, [m!.creator_id]);
+    assert.equal(before, 0);
+
+    // GET — 메일 스캐너가 링크를 미리 열어보는 것만으로 해지되면 안 된다
+    await page.goto(`${BASE}/u/${m!.token}`);
+    assert.match(await page.locator("body").innerText(), /수신거부/);
+    assert.equal(
+      await n(`SELECT count(*) AS n FROM suppression WHERE identifier_val=$1::text`, [m!.creator_id]),
+      0, "GET 만으로는 해지되지 않아야 한다");
+
+    // POST — 버튼을 누르면 전 채널 영구 차단
+    await submit(page.getByRole("button", { name: "수신거부하기" }));
+    assert.match(await page.locator("body").innerText(), /완료/);
+
+    const kinds = (await all<{ identifier_type: string }>(
+      `SELECT identifier_type FROM suppression
+        WHERE identifier_val = $1::text
+           OR identifier_val IN (SELECT handle FROM social_account WHERE creator_id = $1::uuid)
+           OR identifier_val IN (SELECT value_norm FROM contact_point WHERE creator_id = $1::uuid)`,
+      [m!.creator_id])).map((r) => r.identifier_type);
+    assert.ok(kinds.includes("creator_id"), "전 채널 차단이 등재돼야 한다");
+
+    // 시퀀스가 멈추고 배급된 작업도 회수돼야 한다
+    const live = await n(
+      `SELECT count(*) AS n FROM campaign_member WHERE creator_id=$1::uuid AND engine_state > 0`, [m!.creator_id]);
+    assert.equal(live, 0, "살아 있는 시퀀스가 남으면 안 된다");
+
+    // 다시 열면 이미 완료 상태
+    await page.goto(`${BASE}/u/${m!.token}`);
+    assert.match(await page.locator("body").innerText(), /완료되었습니다/);
   });
 
   test("가로 스크롤이 생기지 않는다", async () => {

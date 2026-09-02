@@ -18,7 +18,7 @@ export const MAIL = {
 };
 
 export interface SendCandidate {
-  member_id: string; creator_id: string; handle: string; display_name: string;
+  member_id: string; reply_token: string | null; creator_id: string; handle: string; display_name: string;
   contact_value: string | null; contact_norm: string | null; contact_channel: string | null; consent: string | null;
   last_contact_at: string | null; cadence: string | null; followers: number | null; last_brand: string | null;
 }
@@ -44,7 +44,7 @@ export async function loadCampaignInfo(campaignId: string) {
 
 export async function loadSendCandidates(campaignId: string) {
   return all<SendCandidate>(
-    `SELECT m.id AS member_id, c.id AS creator_id, sa.handle, c.display_name,
+    `SELECT m.id AS member_id, m.reply_token, c.id AS creator_id, sa.handle, c.display_name,
             cp.value AS contact_value, cp.value_norm AS contact_norm, cp.channel AS contact_channel,
             cp.consent_status AS consent,
             to_char(lc.last_contact_at,'YYYY-MM-DD') AS last_contact_at,
@@ -124,7 +124,10 @@ export function evaluateCandidate(
   const channel = isEmail ? "email" : (cand.contact_channel ?? "instagram_dm");
   const policy = policies.find((p) => p.channel === channel) ?? policies.find((p) => p.channel === "instagram_dm")!;
 
-  const unsubUrl = `${MAIL.unsubBase}/${cand.member_id}`;
+  // 수신거부 URL 은 reply_token 을 쓴다. member_id 를 노출하면 내부 식별자가 메일에 실린다.
+  const token = cand.reply_token?.replace(/^cm_/, "") ?? cand.member_id;
+  const unsubUrl = `${MAIL.unsubBase}/${token}`;
+  const [local, domain] = MAIL.address.split("@");
   let rendered: Rendered | null = null;
   let renderError: string | null = null;
   try {
@@ -132,7 +135,7 @@ export function evaluateCandidate(
       { subject: tpl?.subject ?? null, body: tpl?.body ?? "제안 드립니다.", is_ad_content: tpl?.is_ad_content ?? true },
       buildVars(cand, campaign, sender?.display_name ?? "Dinostudio"),
       policy,
-      { ...MAIL, unsubUrl, unsubMailto: MAIL.address, displayName: sender?.display_name ?? "Dinostudio" },
+      { ...MAIL, unsubUrl, unsubMailto: `${local}+unsub_${token}@${domain}`, displayName: sender?.display_name ?? "Dinostudio" },
     );
   } catch (e) {
     renderError = (e as Error).message;

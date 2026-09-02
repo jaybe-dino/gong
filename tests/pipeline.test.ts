@@ -255,7 +255,13 @@ test("임포트 — 소스 PK 가 같고 핸들이 다르면 검토 큐로 가�
 test("임포트 — 사전에 없던 브랜드는 새 브랜드 이벤트를 만든다", async () => {
   const csv = "handle,seller,brand,product,period,category\njinny_kitchen,지니키친,완전새로운브랜드,테스트 제품,2026-09-20 ~ 09-26,리빙\n";
   const batchId = (await analyzeCsv(csv, "momcal", "brand.csv", JAY))!;
+  const since = new Date(Date.now() - 60_000);
   await commitBatch(batchId, JAY);
+  // 델타 감지는 커밋 이후 별도 잡이 돈다 (jobs/detect-changes).
+  const dc = await import("../src/lib/jobs/detect-changes.ts");
+  const r = await dc.detectChanges({ batchId, since });
+  assert.ok(r.events.some((e) => e.kind === "new_brand" && e.title === "완전새로운브랜드"),
+    JSON.stringify(r.events.map((e) => e.kind)));
   const ev = await one<{ n: string }>(
     `SELECT count(*) AS n FROM change_event WHERE batch_id=$1 AND kind='new_brand'`, [batchId]);
   assert.ok(Number(ev!.n) >= 1);
@@ -269,4 +275,252 @@ test("정책·수신거부 조회 헬퍼", async () => {
   assert.equal(pol.find((p) => p.channel === "instagram_dm")!.allows_cold, false);
   assert.equal(pol.find((p) => p.channel === "email")!.automation_mode, "auto");
   assert.ok((await suppressions()).length > 0);
+});
+
+// ---------- 워커 ----------
+
+const seq = await import("../src/lib/jobs/sequence-worker.ts");
+const inbound = await import("../src/lib/jobs/inbound-sync.ts");
+const breaker = await import("../src/lib/jobs/circuit-breaker.ts");
+const detect = await import("../src/lib/jobs/detect-changes.ts");
+const gmailMod = await import("../src/lib/channels/gmail.ts");
+
+test("Reply-To 플러스 주소 — 토큰에 cm_ 가 이미 붙어 있어도 한 번만 붙인다", () => {
+  assert.equal(gmailMod.replyToAddress("partner@dinostudio.kr", "abc123"), "partner+cm_abc123@dinostudio.kr");
+  assert.equal(gmailMod.replyToAddress("partner@dinostudio.kr", "cm_abc123"), "partner+cm_abc123@dinostudio.kr");
+  assert.equal(gmailMod.parseReplyToken("partner+cm_abc123@dinostudio.kr"), "abc123");
+  assert.equal(gmailMod.parseReplyToken("partner@dinostudio.kr"), null);
+});
+
+test("RFC 2822 조립 — 한글 제목은 base64, 수신거부 헤더가 실린다", () => {
+  const raw = Buffer.from(
+    gmailMod.buildRaw({
+      from: "partner@dinostudio.kr", fromName: "지은", to: "a@b.com",
+      replyTo: "partner+cm_x@dinostudio.kr", subject: "(광고) 제안", body: "본문",
+      headers: { "List-Unsubscribe": "<https://x/u/t>", "List-Unsubscribe-Post": "List-Unsubscribe=One-Click" },
+    }),
+    "base64url",
+  ).toString("utf8");
+  assert.match(raw, /^From: =\?UTF-8\?B\?/);
+  assert.match(raw, /Reply-To: partner\+cm_x@dinostudio\.kr/);
+  assert.match(raw, /List-Unsubscribe-Post: List-Unsubscribe=One-Click/);
+  assert.match(raw, /Subject: =\?UTF-8\?B\?/);
+  // 본문은 base64
+  assert.match(raw, new RegExp(Buffer.from("본문", "utf8").toString("base64")));
+});
+
+test("시퀀스 워커 — 발송하고 다음 스텝을 업무시간 안으로 예약한다", async () => {
+  // 아직 아무것도 안 보낸 대상을 하나 지금 발송 대상으로 만든다
+  const m = await one<{ id: string }>(
+    `UPDATE campaign_member SET next_action_at = now() - interval '1 minute', engine_state = 1, current_step = 0
+      WHERE id = (SELECT cm.id FROM campaign_member cm
+                    JOIN contact_point cp ON cp.creator_id = cm.creator_id AND cp.channel='email'
+                   WHERE cm.engine_state > 0 LIMIT 1)
+      RETURNING id`);
+  assert.ok(m, "대상이 있어야 한다");
+
+  // 다른 대상이 섞이지 않도록 이 건만 지금 만기로 둔다
+  await run(`UPDATE campaign_member SET next_action_at = next_action_at + interval '1 day'
+              WHERE id <> $1 AND next_action_at IS NOT NULL AND next_action_at <= now()`, [m!.id]);
+
+  const before = await n("message");
+  const stats = await seq.tick({ limit: 5 });
+  assert.equal(stats.processed, 1, JSON.stringify(stats));
+
+  const after = await one<{ current_step: number; engine_state: number; next_action_at: string | null; reply_token: string | null }>(
+    `SELECT current_step, engine_state, next_action_at, reply_token FROM campaign_member WHERE id=$1`, [m!.id]);
+  if (stats.sent > 0) {
+    assert.ok((await n("message")) > before, "메시지가 기록돼야 한다");
+    assert.ok(after!.reply_token, "reply_token 이 생겨야 한다");
+    assert.equal(after!.current_step, 1, "스텝이 전진해야 한다");
+    assert.ok(after!.next_action_at, "다음 스텝이 예약돼야 한다");
+  } else {
+    assert.ok(stats.queued + stats.blocked === 1, JSON.stringify(stats));
+  }
+});
+
+test("시퀀스 워커 — 전 스텝을 소진하면 무응답으로 종결한다 (실패가 아니다)", async () => {
+  const m = await one<{ id: string }>(
+    `UPDATE campaign_member SET next_action_at = now() - interval '1 minute', engine_state = 3, current_step = 99
+      WHERE id = (SELECT id FROM campaign_member WHERE engine_state > 0 LIMIT 1) RETURNING id`);
+  await run(`UPDATE campaign_member SET next_action_at = next_action_at + interval '1 day'
+              WHERE id <> $1 AND next_action_at IS NOT NULL AND next_action_at <= now()`, [m!.id]);
+  await seq.tick({ limit: 50 });
+  const after = await one<{ engine_state: number; next_action_at: string | null }>(
+    `SELECT engine_state, next_action_at FROM campaign_member WHERE id=$1`, [m!.id]);
+  assert.equal(after!.engine_state, -2, "NO_REPLY 로 종결");
+  assert.equal(after!.next_action_at, null);
+});
+
+test("시퀀스 워커 — 수신거부 대상은 종결시키고 사유를 남긴다", async () => {
+  const target = await one<{ id: string; creator_id: string }>(
+    `SELECT cm.id, cm.creator_id FROM campaign_member cm
+       JOIN contact_point cp ON cp.creator_id=cm.creator_id AND cp.channel='email' LIMIT 1`);
+  await run(`INSERT INTO suppression (identifier_type, identifier_val, channels, reason)
+             VALUES ('creator_id',$1,'{}','dnc_request') ON CONFLICT DO NOTHING`, [target!.creator_id]);
+  await run(`UPDATE campaign_member SET engine_state=1, current_step=0, next_action_at=now() - interval '1 minute'
+              WHERE id=$1`, [target!.id]);
+  await run(`UPDATE campaign_member SET next_action_at = next_action_at + interval '1 day'
+              WHERE id <> $1 AND next_action_at IS NOT NULL AND next_action_at <= now()`, [target!.id]);
+
+  const beforeBlocks = await n("gate_block");
+  await seq.tick({ limit: 50 });
+
+  assert.ok((await n("gate_block")) > beforeBlocks, "차단 사유가 남아야 한다");
+  const after = await one<{ engine_state: number }>(`SELECT engine_state FROM campaign_member WHERE id=$1`, [target!.id]);
+  assert.equal(after!.engine_state, -5, "SUPPRESSED 로 종결");
+  await run(`DELETE FROM suppression WHERE identifier_type='creator_id' AND identifier_val=$1`, [target!.creator_id]);
+});
+
+test("부재중 자동응답은 답장으로 세지 않고 복귀일에 재개한다", async () => {
+  const m = await one<{ id: string }>(`SELECT id FROM campaign_member LIMIT 1`);
+  await run(`UPDATE campaign_member SET engine_state=3, interest_status=0,
+                    reply_token = COALESCE(reply_token, 'tk_' || encode(gen_random_bytes(4),'hex'))
+              WHERE id=$1`, [m!.id]);
+
+  const r = await inbound.ingest({
+    providerMessageId: "ooo_" + Date.now(),
+    threadKey: null, from: "someone@x.com", to: "partner@dinostudio.kr",
+    subject: "자동 회신: 부재중입니다",
+    body: "휴가 중입니다. 9월 20일부터 복귀합니다.",
+    receivedAt: new Date("2026-09-02T01:00:00Z"),
+    isAutoReply: true,
+    replyToken: (await one<{ reply_token: string }>(`SELECT reply_token FROM campaign_member WHERE id=$1`, [m!.id]))!.reply_token,
+  });
+  assert.equal(r, "ok");
+
+  const after = await one<{ engine_state: number; interest_status: number; next_action_at: string | null }>(
+    `SELECT engine_state, interest_status, next_action_at FROM campaign_member WHERE id=$1`, [m!.id]);
+  assert.equal(after!.engine_state, 5, "PAUSED_OOO — 종결이 아니다");
+  assert.equal(after!.interest_status, -5);
+  assert.ok(after!.next_action_at, "복귀일로 재스케줄돼야 한다");
+  // 본문의 "9월 20일부터 복귀" → 그날 09시 KST (= 전날 24시 UTC)
+  assert.equal(new Date(after!.next_action_at!).toISOString(), "2026-09-20T00:00:00.000Z");
+
+  // 같은 메시지를 다시 넣어도 중복 저장되지 않는다
+  const dup = await inbound.ingest({
+    providerMessageId: (await one<{ provider_msg_id: string }>(
+      `SELECT provider_msg_id FROM message WHERE direction='in' ORDER BY sent_at DESC LIMIT 1`))!.provider_msg_id,
+    threadKey: null, from: "x@y.com", to: "p@d.kr", subject: "", body: "",
+    receivedAt: new Date(), isAutoReply: false, replyToken: null,
+  });
+  assert.equal(dup, "duplicate");
+});
+
+test("회신 분류 -4 — creator_id · 핸들 · 이메일 셋 다 등재하고 동의를 opt_out 으로 바꾼다", async () => {
+  const m = await one<{ id: string; creator_id: string; handle: string }>(
+    `SELECT cm.id, cm.creator_id, sa.handle FROM campaign_member cm
+       JOIN social_account sa ON sa.creator_id=cm.creator_id
+       JOIN contact_point cp ON cp.creator_id=cm.creator_id AND cp.channel='email'
+      WHERE NOT EXISTS (SELECT 1 FROM suppression s WHERE s.identifier_val=cm.creator_id::text)
+      LIMIT 1`);
+  assert.ok(m);
+
+  await inbound.classifyReply(m!.id, -4, JAY);
+
+  const kinds = (await all<{ identifier_type: string }>(
+    `SELECT identifier_type FROM suppression
+      WHERE identifier_val = $1::text
+         OR identifier_val = $2::text
+         OR identifier_val IN (SELECT value_norm FROM contact_point WHERE creator_id = $1::uuid)`,
+    [m!.creator_id, m!.handle])).map((r) => r.identifier_type);
+  for (const k of ["creator_id", "ig_handle", "email"]) {
+    assert.ok(kinds.includes(k), `${k} 이 등재돼야 한다`);
+  }
+  const consent = await one<{ n: string }>(
+    `SELECT count(*) AS n FROM contact_point WHERE creator_id=$1::uuid AND consent_status <> 'opt_out'`, [m!.creator_id]);
+  assert.equal(Number(consent!.n), 0, "모든 연락처가 opt_out 이어야 한다");
+
+  const state = await one<{ engine_state: number; key: string }>(
+    `SELECT cm.engine_state, ps.key FROM campaign_member cm JOIN pipeline_stage ps ON ps.id=cm.stage_id WHERE cm.id=$1`,
+    [m!.id]);
+  assert.equal(state!.engine_state, -4);
+  assert.equal(state!.key, "dropped");
+});
+
+test("회신 분류 -1 — 이탈이 아니라 180일 후 재큐잉", async () => {
+  const m = await one<{ id: string }>(`SELECT id FROM campaign_member WHERE engine_state > 0 LIMIT 1`);
+  await inbound.classifyReply(m!.id, -1, JAY);
+  const after = await one<{ engine_state: number; next_action_at: string | null }>(
+    `SELECT engine_state, next_action_at FROM campaign_member WHERE id=$1`, [m!.id]);
+  assert.ok(after!.engine_state > 0, "살아 있는 상태로 남아야 한다");
+  assert.ok(after!.next_action_at, "재큐잉 시각이 잡혀야 한다");
+});
+
+test("회신 분류 3 — 확정으로 옮기고 어트리뷰션 토큰을 발급한다", async () => {
+  const m = await one<{ id: string; creator_id: string }>(
+    `SELECT id, creator_id FROM campaign_member WHERE engine_state > 0 LIMIT 1`);
+  await inbound.classifyReply(m!.id, 3, JAY);
+  const state = await one<{ key: string; agreed_at: string | null }>(
+    `SELECT ps.key, cm.agreed_at FROM campaign_member cm JOIN pipeline_stage ps ON ps.id=cm.stage_id WHERE cm.id=$1`,
+    [m!.id]);
+  assert.equal(state!.key, "agreed");
+  assert.ok(state!.agreed_at);
+  const tok = await one<{ n: string }>(
+    `SELECT count(*) AS n FROM attribution_token WHERE creator_id=$1`, [m!.creator_id]);
+  assert.ok(Number(tok!.n) >= 2, "링크·쿠폰 토큰이 발급돼야 한다");
+});
+
+test("서킷브레이커 — 임계를 넘으면 발신 계정을 정지시킨다", async () => {
+  await run(`UPDATE circuit_breaker SET halt_at = 0, warn_at = 0 WHERE metric='bounce_rate'`);
+  // 바운스 이벤트를 만들어 비율을 올린다
+  const msg = await one<{ id: string }>(`SELECT id FROM message WHERE direction='out' LIMIT 1`);
+  await run(`INSERT INTO message_event (message_id, type) VALUES ($1,'bounce_hard')`, [msg!.id]);
+
+  const r = await breaker.tick();
+  assert.ok(r.values.bounce_rate > 0);
+  assert.ok(r.fired.some((f) => f.metric === "bounce_rate"), JSON.stringify(r.fired));
+  const capped = await one<{ n: string }>(`SELECT count(*) AS n FROM sender WHERE channel='email' AND pause_reason LIKE '%볼륨%'`);
+  assert.ok(Number(capped!.n) > 0, "볼륨 감축 조치가 적용돼야 한다");
+
+  await run(`UPDATE circuit_breaker SET halt_at=0.05, warn_at=0.03, is_tripped=false WHERE metric='bounce_rate'`);
+});
+
+test("액션 블록 신고 — 24시간 정지하고 잔여 작업을 재배정한다", async () => {
+  const s = await one<{ id: string; identifier: string }>(
+    `SELECT id, identifier FROM sender WHERE channel='instagram_dm' AND paused_until IS NULL LIMIT 1`);
+  if (!s) return;
+  await run(`UPDATE outreach_task SET sender_id=$1 WHERE state='queued' AND channel='instagram_dm'`, [s.id]);
+
+  const r = await breaker.reportActionBlock(s.id, "테스트");
+  assert.equal(r.paused, s.identifier);
+  const still = await one<{ n: string }>(
+    `SELECT count(*) AS n FROM outreach_task WHERE sender_id=$1 AND state='queued'`, [s.id]);
+  assert.equal(Number(still!.n), 0, "정지된 계정에 남은 작업이 없어야 한다");
+  const paused = await one<{ paused_until: string | null }>(`SELECT paused_until FROM sender WHERE id=$1`, [s.id]);
+  assert.ok(paused!.paused_until);
+});
+
+test("변화 감지 — 경쟁 브랜드 공구가 열리면 진행 중 타깃에서 자동 제외한다", async () => {
+  const camp = await one<{ id: string; category: string; brand_name: string }>(
+    `SELECT id, category, brand_name FROM campaign WHERE status='running' LIMIT 1`);
+  const m = await one<{ id: string; creator_id: string; handle: string }>(
+    `UPDATE campaign_member SET engine_state=3, stage_id=(SELECT id FROM pipeline_stage WHERE key='contacted')
+      WHERE id=(SELECT cm.id FROM campaign_member cm WHERE cm.campaign_id=$1 LIMIT 1)
+      RETURNING id, creator_id, (SELECT handle FROM social_account WHERE creator_id=campaign_member.creator_id LIMIT 1) AS handle`,
+    [camp!.id]);
+
+  // 경쟁 브랜드 딜을 방금 본 것으로 넣는다
+  const rival = await one<{ id: string }>(
+    `INSERT INTO brand (name, name_norm, category, is_verified)
+     VALUES ('경쟁브랜드테스트','경쟁브랜드테스트',$1,true) RETURNING id`, [camp!.category]);
+  const since = new Date(Date.now() - 60_000);
+  await run(
+    `INSERT INTO deal (creator_id, brand_id, title, title_norm, category_l1, open_date, close_date, first_seen)
+     VALUES ($1,$2,'경쟁 공구 테스트','경쟁공구테스트',$3, CURRENT_DATE, CURRENT_DATE + 5, now())`,
+    [m!.creator_id, rival!.id, camp!.category]);
+
+  const r = await detect.detectChanges({ since });
+  assert.ok(r.autoExcluded > 0, "자동 제외가 일어나야 한다");
+  const after = await one<{ engine_state: number; drop_reason: string | null }>(
+    `SELECT engine_state, drop_reason FROM campaign_member WHERE id=$1`, [m!.id]);
+  assert.equal(after!.engine_state, -6);
+  assert.match(after!.drop_reason ?? "", /브랜드 충돌/);
+  assert.ok(r.events.some((e) => e.kind === "brand_conflict"));
+
+  // 감사 로그가 남아야 한다 — 자동으로 뺀 것도 근거를 남긴다
+  const audit = await one<{ n: string }>(
+    `SELECT count(*) AS n FROM audit_log WHERE entity='campaign_member' AND entity_id=$1 AND action='auto_exclude'`,
+    [m!.id]);
+  assert.ok(Number(audit!.n) > 0);
 });

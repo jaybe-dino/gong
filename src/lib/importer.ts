@@ -233,7 +233,7 @@ export async function analyzeCsv(text: string, source: SourceKey, filename: stri
   return batch.id;
 }
 
-export interface CommitResult { created: number; merged: number; skipped: number; events: number }
+export interface CommitResult { created: number; merged: number; skipped: number }
 
 /**
  * 배치 커밋.
@@ -255,8 +255,6 @@ export async function commitBatch(batchId: string, userId: string): Promise<Comm
   );
 
   let created = 0, merged = 0, skipped = 0;
-  const newBrands: string[] = [];
-  const newDeals: { handle: string; title: string }[] = [];
 
   for (const r of batch.report.rows ?? []) {
     if (r.verdict === "error" || !r.handle) { skipped++; continue; }
@@ -331,7 +329,6 @@ export async function commitBatch(batchId: string, userId: string): Promise<Comm
             `INSERT INTO brand (name, name_norm, category, is_verified) VALUES ($1,$2,$3,false) RETURNING id`,
             [n.brand, bn, n.category])).rows[0];
           brandId = nb.id;
-          newBrands.push(n.brand);
         }
       }
       if (n.product && creatorId) {
@@ -343,40 +340,15 @@ export async function commitBatch(batchId: string, userId: string): Promise<Comm
           [creatorId, accountId, brandId, n.product, normName(n.product), n.category,
            n.openDate, n.closeDate, !n.openDate && !n.closeDate, n.price,
            `https://www.instagram.com/${n.handle}`, n.curated]);
-        if (ins.rows.length) newDeals.push({ handle: n.handle!, title: n.product });
+        void ins;
       }
     });
   }
 
-  // 델타 — 임포트가 만든 변화를 그대로 이벤트로 남긴다.
-  let events = 0;
-  for (const b of newBrands) {
-    await run(
-      `INSERT INTO change_event (batch_id, kind, title, detail, severity)
-       VALUES ($1,'new_brand',$2,$3,'warn')`,
-      [batchId, b, "브랜드 사전에 없던 이름 · 별칭 등록 큐로 보냅니다"]);
-    events++;
-  }
-  for (const d of newDeals.slice(0, 50)) {
-    await run(
-      `INSERT INTO change_event (batch_id, kind, handle, title, detail, severity)
-       VALUES ($1,'new_deal',$2,$3,$4,'info')`,
-      [batchId, d.handle, d.title, `@${d.handle} 신규 공구 감지`]);
-    events++;
-  }
-  for (const r of await all<{ handle: string; candidate: string }>(
-    `SELECT incoming->>'handle' AS handle, incoming->>'handleChanged' AS candidate
-       FROM merge_candidate WHERE batch_id=$1 AND (incoming->>'handleChanged')::boolean AND decision='merge'`, [batchId])) {
-    await run(
-      `INSERT INTO change_event (batch_id, kind, handle, title, detail, severity)
-       VALUES ($1,'handle_change',$2,$3,'alias 이력에 추가하고 병합했습니다','warn')`,
-      [batchId, r.handle, `@${r.handle} 핸들 변경`]);
-    events++;
-  }
-
+  // 델타 감지는 jobs/detect-changes 가 담당한다. 여기서 또 이벤트를 만들면 중복된다.
   await run(
     `UPDATE import_batch SET state='committed', rows_new=$2, rows_merged=$3 WHERE id=$1`,
     [batchId, created, merged]);
 
-  return { created, merged, skipped, events };
+  return { created, merged, skipped };
 }

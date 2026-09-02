@@ -14,7 +14,9 @@
     "test": "node --experimental-strip-types --import ./tests/register.mjs --test tests/logic.test.ts tests/pipeline.test.ts",
     "test:unit": "node --experimental-strip-types --import ./tests/register.mjs --test tests/logic.test.ts",
     "test:e2e": "next build && node --experimental-strip-types --import ./tests/register.mjs --test tests/e2e.test.ts",
-    "test:all": "npm test && npm run test:e2e"
+    "test:all": "npm test && npm run test:e2e",
+    "worker": "node --experimental-strip-types scripts/run-worker.mjs",
+    "worker:once": "node --experimental-strip-types scripts/run-worker.mjs --once"
   },
   "dependencies": {
     "next": "^15.5.4",

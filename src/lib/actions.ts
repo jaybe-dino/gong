@@ -5,6 +5,10 @@ import { redirect } from "next/navigation";
 import { all, one, run, tx } from "./db";
 import { nextBusinessSlot } from "./policy-gate";
 import { evaluateCandidate, loadCampaignInfo, loadGateInputs, loadSendCandidates } from "./outreach";
+import { classifyReply } from "./jobs/inbound-sync";
+import { reportActionBlock } from "./jobs/circuit-breaker";
+import { detectChanges } from "./jobs/detect-changes";
+import { gmail } from "./channels";
 import { interestEffects, INTEREST, ENGINE } from "./states";
 import { parseReturnDate } from "./parse";
 import { analyzeCsv, commitBatch, SOURCES, type SourceKey } from "./importer";
@@ -62,114 +66,28 @@ export async function completeTask(formData: FormData) {
   revalidatePath("/dashboard");
 }
 
-/** 액션 블록 신고 — 계정을 24시간 정지하고 배급된 잔여 작업을 회수한다. */
+/** 액션 블록 신고 — 계정을 24시간 정지하고 배급된 잔여 작업을 다른 계정으로 재배정한다. */
 export async function reportBlock(formData: FormData) {
   const senderId = String(formData.get("senderId") ?? "");
   if (!senderId) return;
-  await tx(async (c) => {
-    await c.query(
-      `UPDATE sender SET paused_until = now() + interval '24 hours', pause_reason='액션 블록 신고' WHERE id=$1`,
-      [senderId],
-    );
-    await c.query(`UPDATE outreach_task SET sender_id=NULL WHERE sender_id=$1 AND state IN ('queued','claimed')`, [senderId]);
-    await c.query(
-      `UPDATE circuit_breaker SET current_value = COALESCE(current_value,0) + 1,
-              is_tripped = true, tripped_at = now() WHERE metric='ig_action_block'`,
-    );
-  });
-  await audit("sender", senderId, "pause", "액션 블록 신고");
+  const r = await reportActionBlock(senderId, "액션 블록 신고");
+  await audit("sender", senderId, "action_block", `재배정 ${r.reassigned}건`);
   revalidatePath("/queue");
   revalidatePath("/policy");
 }
 
-/**
- * 회신 분류 + 부수효과.
- * 분류가 무엇을 일으키는지는 states.interestEffects 한 곳에만 있다.
- */
 export async function classifyThread(formData: FormData) {
   const memberId = String(formData.get("memberId") ?? "");
   const interest = Number(formData.get("interest"));
   if (!memberId || Number.isNaN(interest)) return;
 
-  const eff = interestEffects(interest);
+  // 분류의 부수효과는 워커와 화면이 같은 코드를 쓴다 (jobs/inbound-sync).
+  await classifyReply(memberId, interest, JAY);
 
-  await tx(async (c) => {
-    const m = (
-      await c.query(
-        `SELECT cm.*, sa.handle FROM campaign_member cm
-           JOIN social_account sa ON sa.creator_id = cm.creator_id
-          WHERE cm.id=$1 FOR UPDATE`,
-        [memberId],
-      )
-    ).rows[0];
-    if (!m) return;
-
-    await c.query(`UPDATE campaign_member SET interest_status=$2, replied_at=COALESCE(replied_at, now()) WHERE id=$1`, [memberId, interest]);
-
-    if (eff.stage) {
-      await c.query(`UPDATE campaign_member SET stage_id=(SELECT id FROM pipeline_stage WHERE key=$2) WHERE id=$1`, [memberId, eff.stage]);
-    }
-    if (eff.engineState != null) {
-      // $2 를 두 자리에 그대로 쓰면 Postgres 가 타입을 timestamptz 와 smallint 로 다르게 추론한다.
-      await c.query(
-        `UPDATE campaign_member
-            SET engine_state = $2::smallint,
-                dropped_at = CASE WHEN $2::smallint < 0 THEN now() ELSE dropped_at END,
-                drop_reason = $3
-          WHERE id = $1`,
-        [memberId, eff.engineState, eff.dropReason ?? null]);
-    } else if (interest !== INTEREST.OOO) {
-      // 회신이 왔으면 시퀀스는 성공 종료다. 실패가 아니다.
-      await c.query(`UPDATE campaign_member SET engine_state=$2::smallint, next_action_at=NULL WHERE id=$1 AND engine_state > 0`, [memberId, ENGINE.REPLIED]);
-    }
-
-    if (eff.suppress) {
-      // 핸들과 이메일 양쪽을 등재한다. 하나만 막으면 다른 채널로 새어 나간다.
-      await c.query(
-        `INSERT INTO suppression (identifier_type, identifier_val, channels, reason)
-         VALUES ('ig_handle', $1, '{}', $2) ON CONFLICT DO NOTHING`,
-        [m.handle, eff.suppress.reason],
-      );
-      await c.query(
-        `INSERT INTO suppression (identifier_type, identifier_val, channels, reason)
-         SELECT 'email', value_norm, '{}', $2 FROM contact_point WHERE creator_id=$1 AND channel='email'
-         ON CONFLICT DO NOTHING`,
-        [m.creator_id, eff.suppress.reason],
-      );
-    }
-
-    if (eff.requeueAfterDays) {
-      // 이탈이 아니라 재큐잉이다.
-      await c.query(
-        `UPDATE campaign_member SET engine_state=$2::smallint, next_action_at = now() + ($3 || ' days')::interval WHERE id=$1`,
-        [memberId, ENGINE.PAUSED, eff.requeueAfterDays],
-      );
-    }
-
-    if (eff.parseReturnDate) {
-      const body = (
-        await c.query(`SELECT body FROM message WHERE campaign_member_id=$1 AND direction='in' ORDER BY sent_at DESC LIMIT 1`, [memberId])
-      ).rows[0]?.body as string | undefined;
-      const back = parseReturnDate(body);
-      await c.query(
-        `UPDATE campaign_member SET engine_state=$2::smallint, next_action_at=$3::timestamptz WHERE id=$1`,
-        [memberId, ENGINE.PAUSED_OOO, back ? `${back} 09:00+09` : null],
-      );
-    }
-
-    if (eff.issueToken) {
-      await c.query(
-        `INSERT INTO attribution_token (campaign_id, creator_id, kind, token)
-         VALUES ($1,$2,'link', encode(gen_random_bytes(8),'hex')) ON CONFLICT DO NOTHING`,
-        [m.campaign_id, m.creator_id],
-      );
-    }
-  });
-
-  await audit("campaign_member", memberId, "classify", `interest=${interest}`);
   revalidatePath("/inbox");
   revalidatePath("/dashboard");
   revalidatePath("/campaigns");
+  revalidatePath("/policy");
 }
 
 /**
@@ -241,6 +159,11 @@ export async function startSend(formData: FormData) {
   let tasks = 0;
 
   for (const cand of candidates) {
+    // 회신을 되돌릴 열쇠. 없으면 지금 만든다 — 수신거부 URL 도 이 토큰을 쓴다.
+    if (!cand.reply_token) {
+      cand.reply_token = gmail.newReplyToken();
+      await run(`UPDATE campaign_member SET reply_token=$2 WHERE id=$1`, [cand.member_id, cand.reply_token]);
+    }
     const ev = evaluateCandidate(cand, campaign, inputs, now);
 
     if (!ev.gate.ok) {
@@ -322,9 +245,17 @@ export async function decideMerge(formData: FormData) {
 export async function commitImport(formData: FormData) {
   const batchId = String(formData.get("batchId") ?? "");
   if (!batchId) return;
+
+  // 커밋 시각을 기준으로 잡아야 이번 배치가 만든 것만 델타로 잡힌다.
+  const since = new Date();
   const res = await commitBatch(batchId, JAY);
+  // 델타를 뽑고 그대로 아웃리치 동작으로 연결한다 (브랜드 충돌 → 타깃 자동 제외).
+  const delta = await detectChanges({ batchId, since });
   revalidatePath("/import");
   revalidatePath("/influencers");
   revalidatePath("/watch");
-  redirect(`/import?step=4&batch=${batchId}&created=${res.created}&merged=${res.merged}&skipped=${res.skipped}&events=${res.events}`);
+  redirect(
+    `/import?step=4&batch=${batchId}&created=${res.created}&merged=${res.merged}` +
+    `&skipped=${res.skipped}&events=${delta.events.length}&excluded=${delta.autoExcluded}`,
+  );
 }
