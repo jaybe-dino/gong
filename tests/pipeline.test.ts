@@ -820,3 +820,30 @@ test("이메일 도메인 — MX 없는 도메인의 주소를 invalid 로 내�
       WHERE cp.channel='email' AND cp.verification <> 'valid' LIMIT 1`);
   if (good) assert.notEqual(good.verification, "valid");
 });
+
+test("임포트 — 같은 파일에서 핸들이 겹치면 계정 없는 크리에이터를 만들지 않는다", async () => {
+  // 회귀: 후보 인덱스는 대조 때 한 번 만들어지고 커밋은 그 뒤에 돈다. 같은 파일의
+  // 두 행이 같은 인스타 핸들을 가리키면 둘 다 '신규' 가 되고, 두 번째 크리에이터는
+  // 계정 INSERT 가 UNIQUE 충돌로 기존 계정을 돌려줘 계정이 하나도 안 붙었다.
+  // 모든 조회가 social_account 를 JOIN 하므로 그 사람은 어느 화면에도 안 나온다.
+  const csv = [
+    "샵ID,인스타ID,표시이름,이메일",
+    "shopone,dupe_handle_x,샵 하나,one@example.com",
+    "shoptwo,dupe_handle_x,샵 둘,two@example.com",
+  ].join("\n");
+  const batchId = (await analyzeCsv(csv, "dino", "dupe.csv", JAY))!;
+  for (let g = 0; g < 10; g++) if ((await commitBatch(batchId, JAY)).done) break;
+
+  const orphans = await one<{ n: number }>(
+    `SELECT count(*)::int AS n FROM creator c
+      WHERE c.merged_into IS NULL
+        AND NOT EXISTS (SELECT 1 FROM social_account sa WHERE sa.creator_id = c.id)`);
+  assert.equal(orphans!.n, 0, "계정 없는 크리에이터가 남으면 안 된다");
+
+  // 두 행의 연락처가 모두 같은 사람에게 붙어야 한다 — 한쪽이 사라지면 안 된다.
+  const mails = await all<{ value: string }>(
+    `SELECT cp.value FROM contact_point cp
+       JOIN social_account sa ON sa.creator_id = cp.creator_id
+      WHERE sa.handle='dupe_handle_x' AND cp.channel='email' ORDER BY cp.value`);
+  assert.deepEqual(mails.map((m) => m.value), ["one@example.com", "two@example.com"]);
+});

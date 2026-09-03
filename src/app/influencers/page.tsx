@@ -5,7 +5,6 @@ import CreatorDrawer from "./CreatorDrawer";
 import FitRefresh from "./FitRefresh";
 import { loadCreators, listCampaigns, type ScoredCreator } from "@/lib/queries";
 import { fmt, fol, STAGE_TONE } from "@/lib/format";
-import { TIER_LABEL } from "@/lib/score";
 
 export const dynamic = "force-dynamic";
 
@@ -108,8 +107,8 @@ export default async function InfluencersPage({
               <table>
                 <thead>
                   <tr>
-                    <th>크리에이터</th><th>팔로워</th><th>티어</th><th>30일 딜</th><th>평균 간격</th><th>마지막 공구</th>
-                    <th>적합도</th><th>연락 경로</th><th>진성</th><th>스테이지</th>
+                    <th>크리에이터</th><th>등급</th><th>팔로워</th><th>30일 딜</th><th>평균 간격</th>
+                    <th>마지막 공구</th><th>적합도</th><th>연락 채널</th><th>상태</th><th>스테이지</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -141,16 +140,31 @@ export default async function InfluencersPage({
 
 function Row({ r, href }: { r: ScoredCreator; href: string }) {
   const cad = r.avg_interval_days == null ? null : Math.round(Number(r.avg_interval_days));
-  const cred = r.credibility == null ? null : Number(r.credibility);
+  const isShop = r.platform !== "instagram";
   return (
     <tr className="rowlink">
       <td>
-        <IgLink handle={r.handle}><b>@{r.handle}</b></IgLink>
+        {/* blogpay 샵은 인스타 계정이 없다. 인스타 링크를 걸면 404 로 보낸다. */}
+        {isShop ? (
+          <span className="mono" style={{ fontWeight: 600 }}>{r.handle.replace(/^shop:/, "")}</span>
+        ) : (
+          <IgLink handle={r.handle}><b>@{r.handle}</b></IgLink>
+        )}
         <br />
-        <Link href={href} scroll={false} style={{ fontSize: 11, color: "var(--ink-3)" }}>{r.display_name} ›</Link>
+        <Link href={href} scroll={false} style={{ fontSize: 11, color: "var(--ink-3)" }}>
+          {r.display_name} ›
+        </Link>
+        {isShop && <> <Pill tone="k-mute">샵</Pill></>}
+        {r.biz_no && <> <span style={{ fontSize: 10, color: "var(--ink-3)" }} title="사업자등록번호 보유">사업자</span></>}
+      </td>
+      <td>
+        {r.outreach_tier ? <Pill tone={TIER_TONE[r.outreach_tier] ?? "k-mute"}>{r.outreach_tier}</Pill> : <span className="num">—</span>}
+        {/* 접두사를 떼면 "없음" 만 남아 옆의 채널 배지와 모순돼 보인다. 그들 표기 그대로 둔다. */}
+        {r.contact_grade && (
+          <><br /><span style={{ fontSize: 10, color: "var(--ink-3)" }} title="연락등급 (원본 데이터)">{r.contact_grade}</span></>
+        )}
       </td>
       <td className="num">{fol(r.followers)}</td>
-      <td>{TIER_LABEL[r.tier ?? ""] ?? r.tier ?? "—"}</td>
       <td className="num">{r.deals_30d ?? "—"}</td>
       <td className="num">{cad ? `${cad}일` : "—"}</td>
       <td>
@@ -160,18 +174,64 @@ function Row({ r, href }: { r: ScoredCreator; href: string }) {
             : <span className="num">{r.days_since_last}일 전</span>}
       </td>
       <td>{r.fit.excluded ? <Pill tone="k-stop">제외</Pill> : <FitBar score={r.fit.score} />}</td>
-      <td>{reachPill(r.reach, r.email_verified)}</td>
-      <td className="num" style={cred != null && cred < 50 ? { color: "var(--stop)" } : undefined}>
-        {cred != null ? `${cred.toFixed(0)}%` : "—"}
-      </td>
+      <td>{channelPills(r)}</td>
+      <td>{healthPill(r.health_state, r.health_severity)}</td>
       <td>{r.stage_key ? <Pill tone={STAGE_TONE[r.stage_key] ?? "k-mute"}>{r.stage_label}</Pill> : <Pill tone="k-mute">발굴</Pill>}</td>
     </tr>
   );
 }
 
-function reachPill(reach: string | null, verified: boolean) {
-  if (reach === "email") return <Pill tone="k-ok">{verified ? "이메일 검증" : "이메일"}</Pill>;
-  if (reach === "inpock") return <Pill tone="k-acc">인포크</Pill>;
-  if (reach === "dm") return <Pill tone="k-mute">DM만</Pill>;
-  return <Pill tone="k-mute">미확보</Pill>;
+/** 아웃리치 티어 A~F. A 가 가장 먼저 접촉할 대상이다. */
+const TIER_TONE: Record<string, string> = { A: "k-ok", B: "k-acc", C: "k-acc", D: "k-warn", E: "k-vio", F: "k-mute" };
+
+const CH_LABEL: Record<string, [string, string]> = {
+  email: ["k-ok", "이메일"],
+  inpock_offer: ["k-acc", "인포크"],
+  inlink_form: ["k-acc", "인링크"],
+  linktree_form: ["k-acc", "링크폼"],
+  kakao: ["k-warn", "카카오"],
+  phone: ["k-warn", "전화"],
+  instagram_dm: ["k-mute", "DM"],
+  sms: ["k-warn", "문자"],
+};
+
+/**
+ * 보유한 연락 채널 전부를 보여준다.
+ *
+ * 예전에는 최선 채널 하나만 배지로 찍었다. 실제 데이터에는 이메일과 인링크를 같이
+ * 가진 사람이 많은데, 하나만 보이면 이메일이 막혔을 때 대안이 있는지 알 수 없다.
+ */
+function channelPills(r: ScoredCreator) {
+  const chs = (r.channels ?? []).filter((c) => CH_LABEL[c]);
+  if (!chs.length) {
+    // 연락처가 없어도 DM 딥링크가 있으면 사람이 한 번 눌러 열 수 있다.
+    return r.dm_url ? <Pill tone="k-mute">DM 링크</Pill> : <Pill tone="k-stop">미확보</Pill>;
+  }
+  return (
+    <span style={{ display: "inline-flex", gap: 3, flexWrap: "wrap" }}>
+      {chs.map((c) => {
+        const [tone, label] = CH_LABEL[c];
+        const verified = c === "email" && r.email_verified;
+        return <Pill key={c} tone={tone}>{verified ? `${label}✓` : label}</Pill>;
+      })}
+    </span>
+  );
 }
+
+const HEALTH: Record<string, [string, string]> = {
+  ok: ["k-ok", "정상"],
+  dormant: ["k-warn", "휴면"],
+  stale: ["k-warn", "데이터 낡음"],
+  unreachable: ["k-stop", "연락 불가"],
+  bad_email: ["k-stop", "메일 반송"],
+  bounced: ["k-stop", "바운스"],
+  dead: ["k-stop", "계정 비활성"],
+  suppressed: ["k-stop", "수신거부"],
+};
+
+function healthPill(state: string | null, severity: string | null) {
+  if (!state) return <span style={{ fontSize: 11, color: "var(--ink-3)" }}>미점검</span>;
+  const [tone, label] = HEALTH[state] ?? ["k-mute", state];
+  return <Pill tone={severity === "alert" ? "k-stop" : tone}>{label}</Pill>;
+}
+

@@ -755,6 +755,24 @@ async function applyRow(
     const profileUrl =
       n.sourceUrl ?? n.shopUrl ?? (n.handle ? `https://www.instagram.com/${n.handle}` : `https://${n.shopId}.shop.blogpay.co.kr/`);
 
+    // 만들기 전에 그 핸들을 이미 가진 계정이 있는지 본다.
+    //
+    // 후보 인덱스는 대조 단계에서 한 번 만들어지고, 커밋은 그 뒤에 돈다. 같은 파일
+    // 안에서 두 행이 같은 인스타 핸들을 가리키면(한 사장이 샵을 여러 개 운영하는
+    // 경우 — 실제 데이터의 투어클럽 1·2·3) 둘 다 '신규' 로 판정된다. 그러면 두
+    // 번째 행이 크리에이터를 새로 만들고, 계정 INSERT 는 UNIQUE 충돌로 기존
+    // 계정을 돌려줘서 새 크리에이터에 계정이 하나도 안 붙는다. 모든 조회가
+    // social_account 를 JOIN 하므로 그 사람은 어느 화면에도 안 나온다 —
+    // 실제로 1,332명이 이렇게 사라졌다.
+    if (!creatorId) {
+      const taken = (await c.query(
+        `SELECT id, creator_id FROM social_account WHERE platform=$1 AND handle=$2`, [platform, key])).rows[0];
+      if (taken) {
+        creatorId = taken.creator_id as string;
+        accountId = taken.id as string;
+      }
+    }
+
     if (!creatorId) {
       const cr = (await c.query(
         `INSERT INTO creator (display_name, tier, home_region, is_curated, owner_user_id,

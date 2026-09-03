@@ -357,3 +357,18 @@ ul.tight li{margin-bottom:5px}
 .prog-bar i.bad{background:var(--stop)}
 .prog-note{margin:0;font-size:12px;color:var(--ink-3);line-height:1.6}
 .prog-note.bad{color:var(--stop)}
+
+/* ===== 로그인 ===== */
+.login{min-height:100vh;display:grid;place-items:center;padding:24px;background:var(--surface-2)}
+.login-card{width:100%;max-width:340px;background:var(--surface);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--shadow);padding:28px 26px;display:grid;gap:14px}
+.login-card h1{margin:0;font-family:"Noto Serif KR",serif;font-size:19px;letter-spacing:-.01em}
+.login-card .lede{margin:0;font-size:12.5px;color:var(--ink-3)}
+.login-card form{display:grid;gap:12px;margin-top:4px}
+.login-card .field{display:grid;gap:5px}
+.login-card .field>span{font-size:11px;color:var(--ink-3);font-family:"IBM Plex Mono",monospace;letter-spacing:.06em}
+.login-card input{font:inherit;font-size:14px;padding:9px 11px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--ink)}
+.login-card input:focus{outline:2px solid var(--accent-line);outline-offset:1px;border-color:var(--accent)}
+.login-card .btn{justify-self:stretch;text-align:center;font-size:13.5px;padding:9px 16px}
+.login-card .bad{margin:0;font-size:12.5px;color:var(--stop)}
+.login-card .hint{margin:0;font-size:12px;color:var(--ink-2);line-height:1.7}
+.login-card code{font-family:"IBM Plex Mono",monospace;font-size:11.5px;background:var(--surface-3);padding:1px 5px;border-radius:2px}

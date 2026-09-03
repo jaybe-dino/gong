@@ -37,6 +37,15 @@ export interface CreatorRow {
   conflict_days: number | null;
   conflict_brand: string | null;
   last_contact_at: string | null;
+  /** 실제 보유 채널 전부. reach 는 최선 하나만 알려줘서 표에 쓸 수 없다. */
+  channels: string[] | null;
+  platform: string;
+  dm_url: string | null;
+  outreach_tier: string | null;
+  contact_grade: string | null;
+  biz_no: string | null;
+  health_state: string | null;
+  health_severity: string | null;
   stage_key: string | null;
   stage_label: string | null;
   engine_state: number | null;
@@ -184,7 +193,9 @@ export async function loadCreators(opts: {
   const rows = await all<CreatorRow>(
     `WITH page AS (
        SELECT c.id AS creator_id, c.display_name, c.tier, c.is_curated,
+              c.outreach_tier, c.contact_grade, c.biz_no,
               sa.id AS account_id, sa.handle, sa.profile_url, sa.is_active,
+              sa.platform, sa.dm_url,
               v.followers, v.following, v.posts_count, v.engagement_rate, v.credibility,
               v.deals_30d, v.deals_90d, v.avg_interval_days, v.days_since_last,
               COALESCE(v.category_share, '{}'::jsonb) AS category_share,
@@ -200,7 +211,10 @@ export async function loadCreators(opts: {
             p.followers, p.following, p.posts_count, p.engagement_rate, p.credibility,
             p.deals_30d, p.deals_90d, p.avg_interval_days, p.days_since_last,
             p.category_share, p.captured_at,
+            p.outreach_tier, p.contact_grade, p.biz_no, p.platform, p.dm_url,
             cp.reach, COALESCE(cp.email_verified, false) AS email_verified,
+            cp.channels,
+            h.state AS health_state, h.severity AS health_severity,
             (COALESCE(sup.n, 0) > 0) AS suppressed,
             COALESCE(slots.n, 0)::int AS active_slots,
             conf.days_ago::int AS conflict_days, conf.brand_name AS conflict_brand,
@@ -212,9 +226,11 @@ export async function loadCreators(opts: {
          SELECT CASE WHEN bool_or(channel='email') THEN 'email'
                      WHEN bool_or(channel IN (${sqlList(LINK_FORM_CHANNELS)})) THEN 'inpock'
                      WHEN bool_or(channel='instagram_dm') THEN 'dm' END AS reach,
-                bool_or(channel='email' AND verification='valid') AS email_verified
+                bool_or(channel='email' AND verification='valid') AS email_verified,
+                array_agg(DISTINCT channel ORDER BY channel) AS channels
            FROM contact_point WHERE creator_id = p.creator_id
        ) cp ON true
+       LEFT JOIN creator_health h ON h.creator_id = p.creator_id
        LEFT JOIN LATERAL (
          SELECT count(*)::int AS n FROM suppression s
           WHERE (s.identifier_type='creator_id' AND s.identifier_val = p.creator_id::text)
