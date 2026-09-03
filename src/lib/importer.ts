@@ -18,7 +18,7 @@ import { buildIndex, decide, findBest, type Candidate, type Incoming } from "./d
  * dry-run 으로 분석해 import_batch 에 담고, 사람이 검토 큐를 처리한 뒤에야 커밋한다.
  */
 
-export type SourceKey = "momcal" | "pangpang" | "ingong";
+export type SourceKey = "manual" | "momcal" | "pangpang" | "ingong";
 
 export interface SourceProfile {
   key: SourceKey;
@@ -30,6 +30,26 @@ export interface SourceProfile {
 }
 
 export const SOURCES: Record<SourceKey, SourceProfile> = {
+  manual: {
+    key: "manual", name: "직접 작성", site: "우리 양식",
+    blurb: "우리가 정한 양식. 연락처를 담을 수 있는 유일한 경로 — 세 사이트 내보내기에는 이메일이 없다.",
+    fields: [
+      { column: "handle", target: "social_account.handle", note: "매칭 키. 이것만 필수", rule: "auto" },
+      { column: "display_name", target: "creator.display_name", rule: "auto" },
+      { column: "email", target: "contact_point(email)", note: "형식이 아니면 무시한다", rule: "parse" },
+      { column: "email_source", target: "contact_point.source_type", note: "bio_public 등. 비우면 bio_public", rule: "auto" },
+      { column: "email_source_url", target: "contact_point.source_url", note: "비우면 프로필 URL 로 기록", rule: "auto" },
+      { column: "link_in_bio", target: "contact_point(inpock_offer / linktree_form)", note: "주소로 채널을 가른다", rule: "parse" },
+      { column: "팔로워 / 팔로잉 / 게시물", target: "account_snapshot.*", note: '"5.4만" → 54000', rule: "parse" },
+      { column: "30일 / 90일", target: "account_snapshot.deals_30d / _90d", rule: "parse" },
+      { column: "평균간격 / 마지막공구", target: "account_snapshot.avg_interval_days / days_since_last", note: "타이밍 판정의 기준값", rule: "parse" },
+      { column: "카테고리점유율", target: "account_snapshot.category_share", note: '"리빙 61%, 주방 22%" → jsonb', rule: "parse" },
+      { column: "brand / product", target: "brand.name / deal.title", rule: "auto" },
+      { column: "open_date / close_date", target: "deal.open_date / close_date", note: "예정 공구는 미래 날짜로", rule: "parse" },
+      { column: "always_on", target: "deal.is_always_on", note: "y 면 상시. 마감일과 함께 쓸 수 없다", rule: "auto" },
+      { column: "account_id", target: "source_ref.source_pk", note: "있으면 핸들이 바뀌어도 추적된다", rule: "keep" },
+    ],
+  },
   momcal: {
     key: "momcal", name: "맘캘린더", site: "momcalendar.com",
     blurb: "브랜드 마스터 · 셀러 · 반복 제품 · 사람이 검증한 큐레이션 플래그",
@@ -122,7 +142,12 @@ export function normalizeRow(raw: Record<string, string>, source: SourceKey) {
   const following = parseFollowers(pick(raw, ["팔로잉", "following"]));
   const posts = parseFollowers(pick(raw, ["게시물", "posts", "posts_count"]));
   const lastActive = parseRelativeTime(pick(raw, ["마지막활동", "last_active"]));
-  const [openDate, closeDate] = parsePeriod(pick(raw, ["period", "기간"]), new Date().getFullYear());
+  const [periodOpen, periodClose] = parsePeriod(pick(raw, ["period", "기간"]), new Date().getFullYear());
+  const year = new Date().getFullYear();
+  // 우리 양식은 open_date / close_date 를 따로 준다. 세 사이트 내보내기는 "기간" 한 칸이다.
+  const openDate = parseDate(pick(raw, ["open_date", "오픈일", "open", "시작일"]), year) ?? periodOpen;
+  const closeDate = parseDate(pick(raw, ["close_date", "마감일", "close", "종료일"]), year) ?? periodClose;
+  const alwaysOn = /^(y|yes|true|1|상시)$/i.test(pick(raw, ["always_on", "상시"]) ?? "");
   return {
     handle,
     displayName: pick(raw, ["display_name", "seller", "name", "이름", "셀러"]),
@@ -143,12 +168,35 @@ export function normalizeRow(raw: Record<string, string>, source: SourceKey) {
     brand: pick(raw, ["brand", "브랜드"]),
     product: pick(raw, ["product", "상품명", "제품"]),
     price: parsePrice(pick(raw, ["가격", "price"])),
-    openDate: openDate ?? parseDate(pick(raw, ["오픈일", "open"]), new Date().getFullYear()),
-    closeDate,
+    openDate: alwaysOn ? null : openDate,
+    closeDate: alwaysOn ? null : closeDate,
+    alwaysOn,
     category: pick(raw, ["카테고리", "category"]),
     sourceUrl: pick(raw, ["profile_url", "url", "detail_url"]),
+    // 연락처. 이게 없으면 임포트한 크리에이터에게 메일을 한 통도 보낼 수 없다 —
+    // 도달 가능성 15점도 통째로 0 이 된다.
+    email: normalizeEmail(pick(raw, ["email", "이메일", "메일"])),
+    emailSource: pick(raw, ["email_source", "이메일출처", "연락처출처"]),
+    emailSourceUrl: pick(raw, ["email_source_url", "이메일출처url", "출처url"]),
+    linkInBio: pick(raw, ["link_in_bio", "링크", "인포크", "링크페이지"]),
     source,
   };
+}
+
+/** 소문자·공백 제거. 형식이 아니면 null — 잘못된 주소를 저장하면 바운스로 도메인이 상한다. */
+export function normalizeEmail(raw: string | null): string | null {
+  const v = String(raw ?? "").trim().toLowerCase();
+  if (!v) return null;
+  return /^[^\s@,;]+@[^\s@,;.]+\.[^\s@,;]{2,}$/.test(v) ? v : null;
+}
+
+/** 링크페이지 주소로 채널을 가른다. 인포크와 링크트리는 제안 폼 구조가 다르다. */
+export function linkChannel(url: string | null): "inpock_offer" | "linktree_form" | null {
+  if (!url) return null;
+  const v = url.toLowerCase();
+  if (!/^https?:\/\//.test(v) && !/\.[a-z]{2,}/.test(v)) return null;
+  if (v.includes("inpock")) return "inpock_offer";
+  return "linktree_form";
 }
 
 /** 미리보기로 화면에 내려보내는 행 수. 전체는 import_row 테이블에 담는다. */
@@ -618,7 +666,53 @@ async function applyRow(
       if (n.curated) await c.query(`UPDATE creator SET is_curated=true WHERE id=$1`, [creatorId]);
     }
 
-    if (accountId) {
+    if (accountId && n.linkInBio) {
+      await c.query(`UPDATE social_account SET link_in_bio=$2 WHERE id=$1 AND $2 <> ''`, [accountId, n.linkInBio]);
+    }
+
+    // 연락처. contact_point 는 source_type · source_url · collected_by 가 NOT NULL 이다 —
+    // 어디서 얻었는지 답할 수 없는 연락처는 저장하지 않는다는 설계다. CSV 에 출처가
+    // 없으면 프로필 URL 로 기록하고, 대체했다는 사실을 collect_note 에 남긴다.
+    if (creatorId) {
+      const profile = n.sourceUrl ?? `https://www.instagram.com/${n.handle}`;
+      const fellBack = !n.emailSourceUrl;
+      const srcUrl = n.emailSourceUrl ?? profile;
+      const srcType = n.emailSource ?? "bio_public";
+      const note = fellBack ? "출처 URL 미기재 — 프로필 URL 로 기록" : null;
+
+      if (n.email) {
+        await c.query(
+          `INSERT INTO contact_point
+             (creator_id, channel, value, value_norm, source_type, source_url, collected_at,
+              collected_by, collect_note, consent_status, verification, is_primary)
+           VALUES ($1,'email',$2,$2,$3,$4,now(),$5,$6,'implied_public','unverified',true)
+           ON CONFLICT (creator_id, channel, value_norm) DO UPDATE
+             SET source_url = EXCLUDED.source_url, collect_note = EXCLUDED.collect_note`,
+          [creatorId, n.email, srcType, srcUrl, userId, note]);
+      }
+      const linkCh = linkChannel(n.linkInBio);
+      if (linkCh && n.linkInBio) {
+        await c.query(
+          `INSERT INTO contact_point
+             (creator_id, channel, value, value_norm, source_type, source_url, collected_at,
+              collected_by, collect_note, consent_status, verification, is_primary)
+           VALUES ($1,$2,$3,$4,'link_page_public',$5,now(),$6,$7,'implied_public','unverified',false)
+           ON CONFLICT (creator_id, channel, value_norm) DO NOTHING`,
+          [creatorId, linkCh, n.linkInBio, n.linkInBio.toLowerCase(), profile, userId, note]);
+      }
+    }
+
+    // 지표가 하나도 없는 행은 스냅샷을 만들지 않는다.
+    //
+    // 공구 파일은 handle + 딜 정보만 들고 온다. 그걸로도 스냅샷을 쌓으면 전부 NULL 인
+    // 행이 최신 스냅샷이 되고, 화면과 점수는 최신 것을 보므로 팔로워·딜 수·타이밍이
+    // 통째로 지워진다. 공구 파일 한 번에 모집단 지표가 날아간다.
+    const hasMetrics = [
+      n.followers, n.following, n.posts, n.lastActive,
+      n.deals30, n.deals90, n.avgInterval, n.daysSinceLast,
+    ].some((v) => v != null) || Object.keys(n.categoryShare ?? {}).length > 0;
+
+    if (accountId && hasMetrics) {
       // 덮어쓰지 않고 스냅샷을 쌓는다.
       await c.query(
         `INSERT INTO account_snapshot (social_account_id, source, followers, followers_precision, following,
@@ -626,12 +720,13 @@ async function applyRow(
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
         [accountId, source, n.followers, n.followersPrecision, n.following, n.posts,
          n.lastActive, n.deals30, n.deals90, n.avgInterval, n.daysSinceLast, JSON.stringify(n.categoryShare)]);
-      if (n.platformUserId) {
-        await c.query(
-          `INSERT INTO source_ref (entity, entity_id, source, source_pk, source_url)
-           VALUES ('creator',$1,$2,$3,$4) ON CONFLICT DO NOTHING`,
-          [creatorId, source, n.platformUserId, n.sourceUrl]);
-      }
+    }
+
+    if (creatorId && n.platformUserId) {
+      await c.query(
+        `INSERT INTO source_ref (entity, entity_id, source, source_pk, source_url)
+         VALUES ('creator',$1,$2,$3,$4) ON CONFLICT DO NOTHING`,
+        [creatorId, source, n.platformUserId, n.sourceUrl]);
     }
 
     // 브랜드 · 딜

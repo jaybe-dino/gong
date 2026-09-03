@@ -10,6 +10,8 @@ const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/setup": ["./db/*.sql"],
     "/api/admin/setup": ["./db/*.sql"],
+    // 양식 파일도 런타임에 읽는다.
+    "/api/template/[kind]": ["./samples/template-*.csv"],
   },
 };
 

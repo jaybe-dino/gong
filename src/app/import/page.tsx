@@ -102,6 +102,8 @@ export default async function ImportPage({
             </div>
 
             <div style={{ display: "flex", gap: 8, marginTop: 16, alignItems: "center", flexWrap: "wrap" }}>
+              <a className="btn" href="/api/template/creators">인플루언서 양식 받기</a>
+              <a className="btn" href="/api/template/deals">공구 양식 받기</a>
               <Link className="btn" href={link(2)}>컬럼 매핑 먼저 보기</Link>
               <span style={{ fontSize: 11.5, color: "var(--ink-3)" }}>
                 테스트용 샘플: <code className="mono">samples/pangpang.csv · ingong.csv · momcal.csv</code>

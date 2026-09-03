@@ -672,3 +672,73 @@ test("적합도 캐시 — 임포트가 건드린 크리에이터는 다시 계�
   const { unscored } = await loadCreators({ campaignId: camp!.id, limit: 1 });
   assert.ok(unscored > 0, "화면이 '미계산 N명' 을 알 수 있어야 한다");
 });
+
+// ---------- 우리 양식 ----------
+
+test("우리 양식 — 이메일과 링크페이지가 연락처로 들어간다", async () => {
+  const csv = [
+    "handle,display_name,email,email_source,email_source_url,link_in_bio,팔로워,30일,평균간격",
+    "tpl_alpha,알파맘,alpha@example.com,bio_public,https://www.instagram.com/tpl_alpha,inpock.link/alpha,5.4만,4,8",
+    "tpl_beta,베타맘,,,,linktr.ee/beta,3만,2,12",
+    "tpl_gamma,감마맘,이건이메일이아님,,,,2만,1,20",
+  ].join("\n");
+  const batchId = (await analyzeCsv(csv, "manual", "tpl.csv", JAY))!;
+  for (let g = 0; g < 10; g++) if ((await commitBatch(batchId, JAY)).done) break;
+
+  const cps = await all<{ channel: string; value: string; source_url: string; collect_note: string | null }>(
+    `SELECT cp.channel, cp.value, cp.source_url, cp.collect_note
+       FROM contact_point cp JOIN social_account sa ON sa.creator_id = cp.creator_id
+      WHERE sa.handle LIKE 'tpl_%' ORDER BY cp.channel, cp.value`);
+
+  assert.ok(cps.some((c) => c.channel === "email" && c.value === "alpha@example.com"), "이메일이 들어가야 한다");
+  assert.ok(cps.some((c) => c.channel === "inpock_offer"), "인포크 주소는 inpock_offer 로 간다");
+  assert.ok(cps.some((c) => c.channel === "linktree_form"), "그 외 링크페이지는 linktree_form 으로 간다");
+  assert.ok(!cps.some((c) => c.value === "이건이메일이아님"), "형식이 아닌 값은 저장하지 않는다");
+
+  // 출처 URL 을 안 적으면 프로필 URL 로 기록하고 그 사실을 남긴다.
+  const fellBack = cps.find((c) => c.channel === "linktree_form");
+  assert.match(fellBack!.collect_note ?? "", /출처 URL 미기재/);
+  assert.match(fellBack!.source_url, /instagram\.com\/tpl_beta/);
+});
+
+test("우리 양식 — 공구 파일이 기존 지표를 지우지 않는다", async () => {
+  // 회귀: 공구 파일은 handle + 딜 정보만 들고 온다. 그걸로도 스냅샷을 쌓으면
+  // 전부 NULL 인 행이 최신 스냅샷이 되고, 화면과 점수가 최신을 보므로
+  // 팔로워·딜 수·타이밍이 통째로 지워졌다. 공구 파일 한 번에 모집단이 날아간다.
+  const seedCsv = "handle,display_name,팔로워,30일,평균간격\nsnap_keep,스냅킵,7.7만,5,9\n";
+  let id = (await analyzeCsv(seedCsv, "manual", "s1.csv", JAY))!;
+  for (let g = 0; g < 10; g++) if ((await commitBatch(id, JAY)).done) break;
+
+  const latest = async () => await one<{ followers: number | null; deals_30d: number | null }>(
+    `SELECT v.followers, v.deals_30d FROM social_account sa
+       LEFT JOIN LATERAL (SELECT * FROM account_snapshot s WHERE s.social_account_id=sa.id
+                           ORDER BY s.captured_at DESC LIMIT 1) v ON true
+      WHERE sa.handle='snap_keep'`);
+  assert.equal((await latest())!.followers, 77000);
+
+  const dealCsv = "handle,brand,product,open_date,close_date,가격\nsnap_keep,테스트브랜드,예정 상품,2026-10-05,2026-10-11,29000\n";
+  id = (await analyzeCsv(dealCsv, "manual", "s2.csv", JAY))!;
+  for (let g = 0; g < 10; g++) if ((await commitBatch(id, JAY)).done) break;
+
+  assert.equal((await latest())!.followers, 77000, "공구 파일이 팔로워를 지우면 안 된다");
+  assert.equal((await latest())!.deals_30d, 5, "딜 수도 유지돼야 한다");
+
+  const deal = await one<{ title: string; o: string; c: string; always: boolean }>(
+    `SELECT d.title, to_char(d.open_date,'YYYY-MM-DD') o, to_char(d.close_date,'YYYY-MM-DD') c, d.is_always_on AS always
+       FROM deal d JOIN social_account sa ON sa.creator_id=d.creator_id
+      WHERE sa.handle='snap_keep' AND d.title='예정 상품'`);
+  assert.equal(deal!.o, "2026-10-05");
+  assert.equal(deal!.c, "2026-10-11");
+  assert.equal(deal!.always, false);
+});
+
+test("우리 양식 — 상시 공구는 마감일을 갖지 않는다", async () => {
+  const csv = "handle,product,always_on,close_date\nalways_x,상시 잡화,y,2026-10-01\n";
+  const batchId = (await analyzeCsv(csv, "manual", "a.csv", JAY))!;
+  for (let g = 0; g < 10; g++) if ((await commitBatch(batchId, JAY)).done) break;
+  const d = await one<{ always: boolean; c: string | null }>(
+    `SELECT d.is_always_on AS always, to_char(d.close_date,'YYYY-MM-DD') c
+       FROM deal d JOIN social_account sa ON sa.creator_id=d.creator_id WHERE sa.handle='always_x'`);
+  assert.equal(d!.always, true);
+  assert.equal(d!.c, null, "always_on_has_no_close 제약 — 상시에 마감일을 붙이면 저장 자체가 실패한다");
+});
