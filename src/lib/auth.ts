@@ -42,19 +42,36 @@ function timingSafeEqual(a: string, b: string) {
   return diff === 0;
 }
 
+/**
+ * 환경 변수 값의 앞뒤 공백을 떼어낸다.
+ *
+ * 대시보드에 값을 붙여넣을 때 줄바꿈이나 공백이 같이 들어가는 일이 흔하다.
+ * 그러면 비밀번호를 정확히 입력해도 "맞지 않습니다" 가 뜨고, 무엇이 다른지
+ * 화면에 보이지 않아 원인을 찾을 수 없다.
+ */
 function secret(): string | null {
-  return process.env.APP_PASSWORD || null;
+  const raw = process.env.APP_PASSWORD;
+  if (!raw) return null;
+  const v = raw.trim();
+  return v || null;
 }
 
 export function authConfigured(): boolean {
   return Boolean(secret());
 }
 
+/** 값에 앞뒤 공백이 있었는지. 로그인 화면이 원인을 알려줄 수 있게. */
+export function secretHadWhitespace(): boolean {
+  const raw = process.env.APP_PASSWORD;
+  return Boolean(raw && raw !== raw.trim());
+}
+
 /** 비밀번호가 맞으면 쿠키에 담을 토큰을 만든다. */
 export async function login(password: string): Promise<string | null> {
   const s = secret();
   if (!s) return null;
-  if (!timingSafeEqual(password, s)) return null;
+  // 입력값도 같이 다듬는다. 비밀번호 끝의 공백은 거의 항상 실수다.
+  if (!timingSafeEqual(password.trim(), s)) return null;
   const exp = String(Date.now() + TTL_MS);
   return `${exp}.${await hmac(s, exp)}`;
 }

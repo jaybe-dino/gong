@@ -538,3 +538,76 @@ test("한 소스에 PK 가 여러 개면 어느 쪽으로 들어와도 같은 �
   assert.equal(D.findBest(idx, { handle: "renamed_x", sourcePk: "777", source: "pangpang" }), null,
     "없는 PK 는 매칭되지 않는다");
 });
+
+// ---------- 인증 ----------
+
+test("APP_PASSWORD 앞뒤 공백은 무시한다", async () => {
+  const A = await import("../src/lib/auth.ts");
+  const prev = process.env.APP_PASSWORD;
+  try {
+    // 대시보드에 붙여넣을 때 줄바꿈이 같이 들어가는 일이 흔하다. 그러면 정확히
+    // 입력해도 "맞지 않습니다" 가 뜨고, 무엇이 다른지 화면에 보이지 않는다.
+    process.env.APP_PASSWORD = "dibo1234\n";
+    assert.equal(A.authConfigured(), true);
+    assert.equal(A.secretHadWhitespace(), true);
+    const tok = await A.login("dibo1234");
+    assert.ok(tok, "공백이 붙어 있어도 로그인돼야 한다");
+    assert.equal(await A.verify(tok), true);
+    assert.equal(await A.login("dibo123"), null, "다른 값은 거부");
+
+    // 공백만 든 값은 미설정으로 본다 — 그 값으로 로그인되면 사실상 무인증이다.
+    process.env.APP_PASSWORD = "   ";
+    assert.equal(A.authConfigured(), false);
+    assert.equal(await A.login("   "), null);
+  } finally {
+    if (prev === undefined) delete process.env.APP_PASSWORD;
+    else process.env.APP_PASSWORD = prev;
+  }
+});
+
+test("세션 토큰 — 위조와 만료를 거부한다", async () => {
+  const A = await import("../src/lib/auth.ts");
+  const prev = process.env.APP_PASSWORD;
+  try {
+    process.env.APP_PASSWORD = "pw-abc";
+    const tok = (await A.login("pw-abc"))!;
+    assert.equal(await A.verify(tok), true);
+    assert.equal(await A.verify(tok.replace(/\.(.*)$/, ".forged")), false, "서명 위조 거부");
+    assert.equal(await A.verify("1.abc"), false, "만료 거부");
+    assert.equal(await A.verify(""), false);
+    assert.equal(await A.verify(null), false);
+
+    // 비밀번호가 바뀌면 기존 세션도 무효가 돼야 한다.
+    process.env.APP_PASSWORD = "pw-xyz";
+    assert.equal(await A.verify(tok), false, "비밀번호 변경 후 기존 토큰 무효");
+  } finally {
+    if (prev === undefined) delete process.env.APP_PASSWORD;
+    else process.env.APP_PASSWORD = prev;
+  }
+});
+
+test("수신거부 경로는 로그인 없이 열려 있어야 한다", async () => {
+  const A = await import("../src/lib/auth.ts");
+  // 발송 메일의 List-Unsubscribe 링크다. 막으면 수신거부가 동작하지 않아
+  // 법정 의무를 위반한다.
+  assert.equal(A.isPublicPath("/u/abc123"), true);
+  assert.equal(A.isPublicPath("/login"), true);
+  assert.equal(A.isPublicPath("/api/cron/worker"), true);
+  assert.equal(A.isPublicPath("/api/admin/setup"), true);
+  // 나머지는 전부 막혀야 한다.
+  for (const p of ["/dashboard", "/influencers", "/import", "/policy", "/settings", "/api/template/creators"]) {
+    assert.equal(A.isPublicPath(p), false, p);
+  }
+});
+
+test("DNS 점검 — 조회 실패를 '없음' 으로 보고하지 않는다", async () => {
+  const { checkDomain } = await import("../src/lib/jobs/dns-check.ts");
+  // 없는 도메인은 확실히 missing 이다.
+  const r = await checkDomain("존재하지않는도메인입니다123456.kr");
+  assert.equal(r.ok, false);
+  for (const c of r.checks) {
+    assert.ok(["missing", "unknown"].includes(c.status), `${c.key}=${c.status}`);
+  }
+  // 상태가 unknown 이면 ok 로 올라가지 않는다 — 모르는 것을 됐다고 하면 안 된다.
+  assert.equal(r.checks.some((c) => c.status === "ok"), false);
+});

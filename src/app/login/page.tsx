@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
-import { SESSION_COOKIE, authConfigured, login } from "@/lib/auth";
+import { SESSION_COOKIE, authConfigured, login, secretHadWhitespace } from "@/lib/auth";
 
 export const dynamic = "force-dynamic";
 
@@ -27,6 +27,7 @@ export default async function LoginPage({
 }) {
   const sp = await searchParams;
   const configured = authConfigured();
+  const hadWs = secretHadWhitespace();
 
   return (
     <main className="login">
@@ -42,6 +43,13 @@ export default async function LoginPage({
               <input type="password" name="password" required autoFocus autoComplete="current-password" />
             </label>
             {sp.err ? <p className="bad">비밀번호가 맞지 않습니다.</p> : null}
+            {sp.err && hadWs ? (
+              <p className="hint">
+                환경 변수 <code>APP_PASSWORD</code> 값의 앞이나 뒤에 공백·줄바꿈이 붙어 있습니다.
+                붙여넣을 때 같이 들어간 것으로 보입니다 — 지금은 다듬어서 비교하지만,
+                Vercel 에서 값을 다시 저장해 두는 편이 깔끔합니다.
+              </p>
+            ) : null}
             <button className="btn pri" type="submit">들어가기</button>
           </form>
         ) : (
