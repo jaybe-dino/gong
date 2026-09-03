@@ -1,4 +1,5 @@
 import { scalar } from "@/lib/db";
+import { schemaState } from "@/lib/schema";
 import { setupAction, seedAction } from "./actions";
 
 export const dynamic = "force-dynamic";
@@ -13,7 +14,7 @@ export const maxDuration = 60;
  * Shell 을 쓰지 않는다 — Shell 은 담당자와 미확인 이벤트를 DB 에서 읽어서
  * 초기화 전에는 이 화면 자체가 뜨지 못한다.
  */
-type Probe = { reachable: boolean; tables: number; creator: number | null; error?: string };
+type Probe = { reachable: boolean; tables: number; creator: number | null; error?: string; pending: string[] };
 
 async function probe(): Promise<Probe> {
   try {
@@ -30,9 +31,11 @@ async function probe(): Promise<Probe> {
         creator = null;
       }
     }
-    return { reachable: true, tables, creator };
+    // 마이그레이션이 밀려 있으면 화면 기능이 조용히 빠진다. 무엇이 남았는지 보여준다.
+    const st = await schemaState().catch(() => ({ pending: [] as string[] }));
+    return { reachable: true, tables, creator, pending: st.pending };
   } catch (e) {
-    return { reachable: false, tables: 0, creator: null, error: (e as Error).message };
+    return { reachable: false, tables: 0, creator: null, error: (e as Error).message, pending: [] };
   }
 }
 
@@ -54,6 +57,7 @@ export default async function SetupPage({
       <section className="card">
         <h2>현재 상태</h2>
         {s.reachable ? (
+          <>
           <dl>
             <div>
               <dt>연결</dt>
@@ -69,7 +73,22 @@ export default async function SetupPage({
               <dt>크리에이터</dt>
               <dd>{s.creator === null ? "—" : `${s.creator.toLocaleString("ko-KR")}명`}</dd>
             </div>
+            <div>
+              <dt>마이그레이션</dt>
+              <dd className={s.pending.length ? "bad" : "good"}>
+                {s.pending.length === 0 ? "최신" : `${s.pending.length}개 미적용`}
+              </dd>
+            </div>
           </dl>
+          {s.pending.length > 0 && (
+            <p className="hint" style={{ marginTop: 10 }}>
+              아직 적용되지 않은 것: <code>{s.pending.join(", ")}</code>
+              <br />
+              아래 <b>1. 스키마 적용</b> 을 누르면 올라갑니다. 기존 데이터는 건드리지 않습니다.
+              적용 전에는 적합도 순위와 유효성 점검이 화면에서 빠집니다.
+            </p>
+          )}
+          </>
         ) : (
           <>
             <p className="bad">DB 에 연결되지 않습니다.</p>

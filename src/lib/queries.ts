@@ -2,6 +2,7 @@ import { all, one } from "./db";
 import { fitScore, relatedCategories, timing, type ScoreInput, type ScoreResult, type Timing } from "./score";
 import type { ChannelPolicy, SuppressionRow } from "./policy-gate";
 import { LINK_FORM_CHANNELS, REACHABLE_CHANNELS, sqlList, sqlRank } from "./channels/kinds";
+import { hasColumn, hasTable } from "./schema";
 
 /**
  * 화면이 쓰는 조회 계층.
@@ -93,13 +94,24 @@ export async function loadCreators(opts: {
   const campaign = opts.campaignId ? await getCampaign(opts.campaignId) : await defaultCampaign();
   const cats = campaign ? relatedCategories(campaign.category) : [""];
 
+  // 마이그레이션을 안 돌린 배포에서도 목록은 떠야 한다. 없으면 그 기능만 빠진다.
+  const [hasFit, hasHealth, hasDino] = await Promise.all([
+    hasTable("creator_fit"),
+    hasTable("creator_health"),
+    // 006 이 기존 테이블에 더한 컬럼. 테이블은 있는데 컬럼이 없는 상태가 가능하다.
+    hasColumn("creator", "outreach_tier"),
+  ]);
+
   // 필터 조건은 카운트 쿼리와 목록 쿼리가 공유한다. 파라미터 번호가 어긋나지 않도록
   // 필터용 값을 먼저 모으고, 목록 쿼리에서만 쓰는 값(카테고리 집합·캠페인 브랜드)을 뒤에 붙인다.
   const filters: string[] = ["c.merged_into IS NULL"];
   // 캠페인 id 를 맨 앞에 둔다. 카운트 쿼리와 목록 쿼리가 같은 조인(creator_fit)을
   // 써야 하는데, 뒤에 붙이면 카운트 쿼리에 그 파라미터가 없어서 필터가 깨진다
   // (실제로 '연락 가능만' 필터가 500 을 냈다).
-  const filterParams: unknown[] = [campaign?.id ?? null];
+  // 캐시 테이블이 없으면 조인 자체를 빼므로 그 파라미터도 넣지 않는다.
+  // 넣어두면 SQL 에 $1 이 없는데 값이 하나 남아서
+  // "bind message supplies 1 parameters, but prepared statement requires 0" 로 죽는다.
+  const filterParams: unknown[] = hasFit ? [campaign?.id ?? null] : [];
   const pCamp = 1;
   if (opts.category) {
     filterParams.push(opts.category);
@@ -117,14 +129,14 @@ export async function loadCreators(opts: {
                            WHERE x.creator_id = c.id
                              AND x.channel IN (${sqlList(REACHABLE_CHANNELS)})
                              AND x.consent_status <> 'opt_out')`);
-    filters.push(`COALESCE(cf.excluded, false) = false`);
+    if (hasFit) filters.push(`COALESCE(cf.excluded, false) = false`);
   }
   if (opts.notInCampaign) {
     filterParams.push(opts.notInCampaign);
     filters.push(`NOT EXISTS (SELECT 1 FROM campaign_member m
                                WHERE m.creator_id = c.id AND m.campaign_id = $${filterParams.length})`);
   }
-  if (opts.onlyExcluded != null) {
+  if (opts.onlyExcluded != null && hasFit) {
     filters.push(`COALESCE(cf.excluded, false) = ${opts.onlyExcluded ? "true" : "false"}`);
   }
   if (opts.filterIds) {
@@ -141,7 +153,7 @@ export async function loadCreators(opts: {
       SELECT * FROM account_snapshot s WHERE s.social_account_id = sa.id
       ORDER BY s.captured_at DESC LIMIT 1
     ) v ON true
-    LEFT JOIN creator_fit cf ON cf.creator_id = c.id AND cf.campaign_id = $${pCamp}::uuid`;
+    ${hasFit ? `LEFT JOIN creator_fit cf ON cf.creator_id = c.id AND cf.campaign_id = $${pCamp}::uuid` : ""}`;
   const whereSql = `WHERE ${filters.join(" AND ")}`;
 
   const total = Number(
@@ -150,7 +162,7 @@ export async function loadCreators(opts: {
 
   // 점수 캐시가 아직 없는 크리에이터 수. 화면이 "계산 필요"를 알려야 한다 —
   // 조용히 뒤로 밀면 목록이 완전해 보이는데 실제로는 아니다.
-  const unscored = campaign
+  const unscored = campaign && hasFit
     ? Number(
         (await one<{ n: string }>(
           `SELECT count(*) AS n FROM creator c
@@ -167,7 +179,8 @@ export async function loadCreators(opts: {
   const pBrand = filterParams.length + 2;
   const params = [...filterParams, cats, campaign?.brand_id ?? null];
 
-  const order = opts.order ?? "fit";
+  // 캐시 테이블이 없으면 적합도·타이밍 정렬을 걸 수 없다. 팔로워 순으로 내린다.
+  const order = (!hasFit && (opts.order ?? "fit") !== "id") ? "followers" : (opts.order ?? "fit");
   const orderSql =
     order === "followers" ? "v.followers DESC NULLS LAST, c.id"
     : order === "deals" ? "v.deals_30d DESC NULLS LAST, c.id"
@@ -193,14 +206,16 @@ export async function loadCreators(opts: {
   const rows = await all<CreatorRow>(
     `WITH page AS (
        SELECT c.id AS creator_id, c.display_name, c.tier, c.is_curated,
-              c.outreach_tier, c.contact_grade, c.biz_no,
+              ${hasDino ? "c.outreach_tier, c.contact_grade, c.biz_no, sa.dm_url,"
+                         : "NULL::text AS outreach_tier, NULL::text AS contact_grade, NULL::text AS biz_no, NULL::text AS dm_url,"}
               sa.id AS account_id, sa.handle, sa.profile_url, sa.is_active,
-              sa.platform, sa.dm_url,
+              sa.platform,
               v.followers, v.following, v.posts_count, v.engagement_rate, v.credibility,
               v.deals_30d, v.deals_90d, v.avg_interval_days, v.days_since_last,
               COALESCE(v.category_share, '{}'::jsonb) AS category_share,
               to_char(v.captured_at, 'YYYY-MM-DD HH24:MI') AS captured_at,
-              cf.score AS cached_score, cf.excluded AS cached_excluded, cf.timing_ratio
+              ${hasFit ? "cf.score AS cached_score, cf.excluded AS cached_excluded, cf.timing_ratio"
+                        : "NULL::smallint AS cached_score, NULL::boolean AS cached_excluded, NULL::numeric AS timing_ratio"}
          ${joins}
         ${whereSql}
         ORDER BY ${orderSql}
@@ -214,7 +229,7 @@ export async function loadCreators(opts: {
             p.outreach_tier, p.contact_grade, p.biz_no, p.platform, p.dm_url,
             cp.reach, COALESCE(cp.email_verified, false) AS email_verified,
             cp.channels,
-            h.state AS health_state, h.severity AS health_severity,
+            ${hasHealth ? "h.state AS health_state, h.severity AS health_severity," : "NULL::text AS health_state, NULL::text AS health_severity,"}
             (COALESCE(sup.n, 0) > 0) AS suppressed,
             COALESCE(slots.n, 0)::int AS active_slots,
             conf.days_ago::int AS conflict_days, conf.brand_name AS conflict_brand,
@@ -230,7 +245,7 @@ export async function loadCreators(opts: {
                 array_agg(DISTINCT channel ORDER BY channel) AS channels
            FROM contact_point WHERE creator_id = p.creator_id
        ) cp ON true
-       LEFT JOIN creator_health h ON h.creator_id = p.creator_id
+       ${hasHealth ? "LEFT JOIN creator_health h ON h.creator_id = p.creator_id" : ""}
        LEFT JOIN LATERAL (
          SELECT count(*)::int AS n FROM suppression s
           WHERE (s.identifier_type='creator_id' AND s.identifier_val = p.creator_id::text)

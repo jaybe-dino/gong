@@ -2,6 +2,7 @@ import Link from "next/link";
 import Shell from "@/components/Shell";
 import { Card, Empty, Note, Pill, Scroller } from "@/components/ui";
 import { all, one } from "@/lib/db";
+import { hasTable } from "@/lib/schema";
 import { beginCommit, decideMerge } from "@/lib/actions";
 import Progress from "./Progress";
 import Uploader from "./Uploader";
@@ -54,7 +55,7 @@ export default async function ImportPage({
               COALESCE(u.name,'—') AS uploader
          FROM import_batch b LEFT JOIN app_user u ON u.id=b.uploaded_by
         ORDER BY b.observed_at DESC LIMIT 12`),
-    batch
+    batch && (await hasTable("import_row"))
       ? one<{ deferred: number; events: number }>(
           `SELECT (SELECT count(*)::int FROM import_row WHERE batch_id=$1 AND state='deferred') AS deferred,
                   (SELECT count(*)::int FROM change_event WHERE batch_id=$1) AS events`,

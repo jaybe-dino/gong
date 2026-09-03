@@ -1,5 +1,6 @@
 import dns from "node:dns/promises";
 import { all, one, run } from "../db";
+import { hasTable } from "../schema";
 import { REACHABLE_CHANNELS, sqlList } from "../channels/kinds";
 
 /**
@@ -180,6 +181,7 @@ async function upsertHealth(
 
 /** 상태 요약. 화면이 쓴다. */
 export async function healthSummary() {
+  if (!(await hasTable("creator_health"))) return [];
   return await all<{ state: string; severity: string; n: number }>(
     `SELECT state, severity, count(*)::int AS n FROM creator_health GROUP BY state, severity ORDER BY n DESC`,
   );
@@ -187,6 +189,7 @@ export async function healthSummary() {
 
 /** 소스별 업로드 신선도. 업로드가 끊기면 모든 판정이 낡은 데이터 위에서 돈다. */
 export async function freshness() {
+  if (!(await hasTable("source_freshness"))) return [];
   return await all<{ source: string; last_upload: string; days_ago: number; rows_total: number }>(
     `SELECT source, to_char(last_upload,'YYYY-MM-DD') AS last_upload, days_ago, rows_total
        FROM source_freshness ORDER BY days_ago DESC`,

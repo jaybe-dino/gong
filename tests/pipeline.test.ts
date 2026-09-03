@@ -847,3 +847,29 @@ test("임포트 — 같은 파일에서 핸들이 겹치면 계정 없는 크리
       WHERE sa.handle='dupe_handle_x' AND cp.channel='email' ORDER BY cp.value`);
   assert.deepEqual(mails.map((m) => m.value), ["one@example.com", "two@example.com"]);
 });
+
+// ---------- 마이그레이션 미적용 내구성 ----------
+
+test("마이그레이션이 밀려 있어도 조회가 죽지 않는다", async () => {
+  const S = await import("../src/lib/schema.ts");
+  const { loadCreators } = await import("../src/lib/queries.ts");
+
+  // 회귀: 새 테이블·컬럼을 참조하는 조회가 실패하면 화면 전체가 500 이 됐다.
+  // 사용자는 "페이지가 안 나온다" 만 보고 무엇을 해야 하는지 알 수 없다.
+  // 실제로 배포 직후 /influencers · /campaigns · /import 가 죽었다.
+  assert.equal(await S.hasTable("creator_fit"), true);
+  assert.equal(await S.hasTable("절대없는테이블_xyz"), false);
+  assert.equal(await S.hasColumn("creator", "outreach_tier"), true);
+  assert.equal(await S.hasColumn("creator", "절대없는컬럼_xyz"), false);
+
+  const st = await S.schemaState();
+  assert.equal(st.ready, true, `미적용: ${st.pending.join(", ")}`);
+  assert.deepEqual(st.pending, []);
+
+  // 캐시 테이블이 없다고 가정한 경로도 파라미터가 맞아야 한다.
+  // (없을 때 조인을 빼면서 파라미터는 남겨둬 "bind message supplies 1 parameters,
+  //  but prepared statement requires 0" 로 죽었다.)
+  const r = await loadCreators({ limit: 5, order: "followers" });
+  assert.ok(r.rows.length > 0);
+  assert.ok(r.total > 0);
+});
