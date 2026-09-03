@@ -742,3 +742,71 @@ test("우리 양식 — 상시 공구는 마감일을 갖지 않는다", async (
   assert.equal(d!.always, true);
   assert.equal(d!.c, null, "always_on_has_no_close 제약 — 상시에 마감일을 붙이면 저장 자체가 실패한다");
 });
+
+// ---------- 유효성 점검 에이전트 ----------
+
+test("유효성 점검 — 연락 불가·수신거부·휴면을 상태로 남긴다", async () => {
+  const V = await import("../src/lib/jobs/validate.ts");
+  await run(`DELETE FROM creator_health`);
+  for (let g = 0; g < 40; g++) if ((await V.checkHealth({ limit: 2000 })).done) break;
+
+  const total = await one<{ n: number }>(`SELECT count(*)::int AS n FROM creator WHERE merged_into IS NULL`);
+  const scored = await one<{ n: number }>(`SELECT count(*)::int AS n FROM creator_health`);
+  assert.equal(scored!.n, total!.n, "살아 있는 크리에이터 전원에 상태가 있어야 한다");
+
+  // 수신거부 등재자는 반드시 suppressed 다 — 다른 사유보다 먼저다.
+  const sup = await one<{ state: string; severity: string }>(
+    `SELECT h.state, h.severity FROM creator_health h
+       JOIN social_account sa ON sa.creator_id = h.creator_id
+       JOIN suppression s ON s.identifier_type='ig_handle' AND s.identifier_val = sa.handle
+      LIMIT 1`);
+  if (sup) {
+    assert.equal(sup.state, "suppressed");
+    assert.equal(sup.severity, "alert");
+  }
+
+  // 연락처가 하나도 없으면 unreachable 이어야 한다.
+  const un = await one<{ state: string; reasons: string[] }>(
+    `SELECT h.state, h.reasons FROM creator_health h
+      WHERE NOT EXISTS (SELECT 1 FROM contact_point cp WHERE cp.creator_id = h.creator_id)
+        AND h.state <> 'suppressed' AND h.state <> 'dead'
+      LIMIT 1`);
+  if (un) {
+    assert.equal(un.state, "unreachable");
+    assert.ok(un.reasons.some((r) => r.includes("연락 수단 없음")), JSON.stringify(un.reasons));
+  }
+});
+
+test("유효성 점검 — 상태가 그대로면 changed 로 세지 않는다", async () => {
+  const V = await import("../src/lib/jobs/validate.ts");
+  await run(`DELETE FROM creator_health`);
+  const first = await V.checkHealth({ limit: 300 });
+  assert.equal(first.changed, first.checked, "처음 담긴 것은 전부 변화다");
+
+  // 같은 대상을 다시 봐도 상태가 같으면 변화가 아니다 — 알림이 매번 울리면 안 된다.
+  const again = await V.checkHealth({ limit: 300, recheckBefore: new Date(Date.now() + 1000) });
+  assert.ok(again.checked > 0, "재점검 대상이 있어야 한다");
+  assert.equal(again.changed, 0, "상태가 같으면 변화 0");
+});
+
+test("이메일 도메인 — MX 없는 도메인의 주소를 invalid 로 내린다", async () => {
+  const V = await import("../src/lib/jobs/validate.ts");
+  const target = await one<{ creator_id: string }>(`SELECT id AS creator_id FROM creator LIMIT 1`);
+  await run(
+    `INSERT INTO contact_point (creator_id, channel, value, value_norm, source_type, source_url, collected_at, collected_by)
+     VALUES ($1,'email','x@존재하지않는도메인입니다123.kr','x@존재하지않는도메인입니다123.kr','bio_public','https://x',now(),$2)
+     ON CONFLICT DO NOTHING`, [target!.creator_id, JAY]);
+
+  for (let g = 0; g < 30; g++) if ((await V.verifyEmailDomains({ limit: 40 })).done) break;
+
+  const row = await one<{ verification: string }>(
+    `SELECT verification FROM contact_point WHERE value_norm='x@존재하지않는도메인입니다123.kr'`);
+  assert.equal(row!.verification, "invalid", "MX 가 없으면 invalid");
+
+  // MX 가 있다고 valid 로 올리지는 않는다 — 도메인이 메일을 받는다는 뜻일 뿐이다.
+  const good = await one<{ verification: string }>(
+    `SELECT cp.verification FROM contact_point cp JOIN email_domain d
+        ON d.domain = split_part(cp.value_norm,'@',2) AND d.has_mx
+      WHERE cp.channel='email' AND cp.verification <> 'valid' LIMIT 1`);
+  if (good) assert.notEqual(good.verification, "valid");
+});

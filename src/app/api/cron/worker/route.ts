@@ -3,6 +3,7 @@ import { tick as sequenceTick } from "@/lib/jobs/sequence-worker";
 import { tick as inboundTick } from "@/lib/jobs/inbound-sync";
 import { tick as breakerTick, rampUp, resetDaily } from "@/lib/jobs/circuit-breaker";
 import { refreshFit } from "@/lib/jobs/refresh-fit";
+import { checkHealth, verifyEmailDomains } from "@/lib/jobs/validate";
 import { defaultCampaign } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
@@ -33,6 +34,10 @@ export async function GET(req: Request) {
     ["inbound", inboundTick],
     ["sequence", () => sequenceTick({ limit: 50 })],
     // 적합도 캐시. 임포트가 무효화한 만큼만 채운다 — 사람이 화면을 안 열어도 채워져야 한다.
+    // 유효성 점검. 하루 한 번 전원을 다시 본다 — 그 사이 수신거부·바운스가 쌓인다.
+    ["health", () => checkHealth({ limit: 5000, recheckBefore: new Date(Date.now() - 86400_000) })],
+    // 이메일 도메인 MX. 도메인 단위라 하루 50개면 금방 다 본다.
+    ["domains", () => verifyEmailDomains({ limit: 50 })],
     ["fit", async () => {
       const c = await defaultCampaign();
       return c ? await refreshFit(c.id, { limit: 2000 }) : { scored: 0, remaining: 0, done: true };

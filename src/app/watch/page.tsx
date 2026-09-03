@@ -3,6 +3,7 @@ import { Card, Empty, IgLink, Note, Pill, Scroller } from "@/components/ui";
 import { all, one } from "@/lib/db";
 import { fmt } from "@/lib/format";
 import { markEventsRead } from "@/lib/actions";
+import { freshness, healthSummary, STALE_DAYS } from "@/lib/jobs/validate";
 
 export const dynamic = "force-dynamic";
 
@@ -23,6 +24,11 @@ const COND: Record<string, string> = {
   new_deal: "새 공구가 열릴 때", new_seller: "새 셀러가 붙을 때",
   timing_ready: "적기 도달", surge: "일 N건 이상 급증", keyword_match: "제품명에 포함",
 };
+const HEALTH_LABEL: Record<string, string> = {
+  ok: "정상", dormant: "휴면 추정", stale: "데이터 오래됨", unreachable: "연락 수단 없음",
+  bounced: "바운스 누적", dead: "계정 비활성", suppressed: "수신거부",
+};
+
 const TARGET_KIND: Record<string, string> = { brand: "브랜드", seller: "셀러", keyword: "키워드", category: "카테고리" };
 
 export default async function WatchPage() {
@@ -42,6 +48,8 @@ export default async function WatchPage() {
          FROM change_event ORDER BY occurred_at DESC, id DESC LIMIT 40`),
     one<{ n: string }>(`SELECT count(*) AS n FROM change_event WHERE NOT is_read`),
   ]);
+  const [health, fresh] = await Promise.all([healthSummary(), freshness()]);
+  const healthTotal = health.reduce((a, h) => a + h.n, 0);
 
   const counts = await one<{ sellers: string; brands: string }>(
     `SELECT count(*) FILTER (WHERE kind='seller') AS sellers, count(*) FILTER (WHERE kind='brand') AS brands FROM watchlist`,
@@ -50,7 +58,58 @@ export default async function WatchPage() {
   return (
     <Shell path="/watch" title="변화 감지" sub="이전 스냅샷과의 델타">
       <section className="screen">
-        <div className="watchgrid">
+        <Card title="유효성 점검" hint={`크리에이터 ${fmt(healthTotal)}명 · 하루 한 번 전원 재점검`}>
+          <div className="card-b">
+            {healthTotal === 0 ? (
+              <Empty>아직 점검하지 않았습니다. 크론이 돌면 채워집니다.</Empty>
+            ) : (
+              <>
+                <div className="kpis">
+                  {health.map((h) => (
+                    <div className="kpi" key={h.state}>
+                      <span className="lab">{HEALTH_LABEL[h.state] ?? h.state}</span>
+                      <div className="val" style={{ color: h.severity === "alert" ? "var(--stop)" : h.severity === "warn" ? "var(--warn)" : "var(--ok)" }}>
+                        {fmt(h.n)}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+                <p className="lede" style={{ marginTop: 12 }}>
+                  판정은 우리가 가진 데이터에서만 나옵니다. 입력이 CSV 업로드뿐이므로 계정 정지나 게시물
+                  삭제는 다음 업로드 전까지 알 수 없습니다 — 그래서 &quot;데이터가 낡았다&quot;를 상태로
+                  드러냅니다 (스냅샷 {STALE_DAYS}일 초과).
+                </p>
+              </>
+            )}
+          </div>
+        </Card>
+
+        <Card title="소스별 업로드 신선도" hint="업로드가 끊기면 모든 판정이 낡은 데이터 위에서 돕니다">
+          {fresh.length === 0 ? <Empty>커밋된 임포트가 없습니다.</Empty> : (
+            <Scroller>
+              <table>
+                <thead><tr><th>소스</th><th>마지막 업로드</th><th className="num">경과</th><th className="num">누적 행</th><th>상태</th></tr></thead>
+                <tbody>
+                  {fresh.map((f) => (
+                    <tr key={f.source}>
+                      <td>{f.source}</td>
+                      <td className="num">{f.last_upload}</td>
+                      <td className="num">{f.days_ago}일</td>
+                      <td className="num">{fmt(f.rows_total)}</td>
+                      <td>
+                        <Pill tone={f.days_ago > STALE_DAYS ? "k-stop" : f.days_ago > 7 ? "k-warn" : "k-ok"}>
+                          {f.days_ago > STALE_DAYS ? "오래됨" : f.days_ago > 7 ? "업로드 필요" : "최신"}
+                        </Pill>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </Scroller>
+          )}
+        </Card>
+
+                <div className="watchgrid">
           <div className="wcard"><span className="wl">마지막 갱신</span>
             <div className="wn" style={{ fontSize: 15 }}>{lastBatch?.observed_at ?? "—"}</div>
             <div className="ws">{lastBatch?.source ?? "업로드 없음"}</div></div>
