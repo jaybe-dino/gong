@@ -68,6 +68,8 @@ export interface MatchResult {
   evidence: string;
   deterministic: boolean;
   handleChanged?: boolean;
+  /** 같은 핸들인데 표시명이 크게 다름. 병합하되 사람이 볼 수 있게 남긴다. */
+  nameChanged?: boolean;
 }
 
 export function scoreMatch(incoming: Incoming, cand: Candidate): MatchResult {
@@ -84,15 +86,25 @@ export function scoreMatch(incoming: Incoming, cand: Candidate): MatchResult {
   const hi = normalizeHandle(incoming.handle);
   const hc = normalizeHandle(cand.handle);
 
-  // 2. 핸들 완전 일치
+  // 2. 핸들 완전 일치 — 같은 플랫폼에서 핸들은 고유하다. 같은 계정이다.
+  //
+  // 예전에는 표시명이 크게 다르면 검토 큐로 보냈다(동명이인·계정 양도 우려).
+  // 실제 데이터에서 이 규칙이 한 번의 임포트에 772건을 큐로 밀어냈다 — 전부
+  // 같은 핸들, 같은 계정이고 이름 표기만 달랐다. 그 정도 분량은 사람이 하나씩
+  // 보지 않고 전부 승인해 버리므로, 검토 큐 자체가 무의미해진다.
+  //
+  // 병합하되 이름이 크게 다르다는 사실은 근거에 남긴다. 계정 양도가 실제로
+  // 일어났다면 이름 변경 이벤트로 드러난다.
   if (hi && hc && hi === hc) {
-    // 핸들이 같아도 표시명이 크게 다르면 사람이 봐야 한다 (동명이인 · 계정 양도)
     const ni = normName(incoming.displayName);
     const nc = normName(cand.display_name);
-    if (ni && nc && ni !== nc && similarity(ni, nc) <= 0.7) {
-      return { score: 0.94, evidence: "핸들 완전 일치 · 표시명 불일치 · 동명이인 가능", deterministic: false };
-    }
-    return { score: 1, evidence: "핸들 완전 일치", deterministic: true };
+    const renamed = Boolean(ni && nc && ni !== nc && similarity(ni, nc) <= 0.7);
+    return {
+      score: 1,
+      evidence: renamed ? "핸들 완전 일치 · 표시명 변경" : "핸들 완전 일치",
+      deterministic: true,
+      nameChanged: renamed,
+    };
   }
 
   let score = 0;

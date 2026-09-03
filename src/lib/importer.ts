@@ -18,7 +18,7 @@ import { buildIndex, decide, findBest, type Candidate, type Incoming } from "./d
  * dry-run 으로 분석해 import_batch 에 담고, 사람이 검토 큐를 처리한 뒤에야 커밋한다.
  */
 
-export type SourceKey = "manual" | "momcal" | "pangpang" | "ingong";
+export type SourceKey = "dino" | "manual" | "momcal" | "pangpang" | "ingong";
 
 export interface SourceProfile {
   key: SourceKey;
@@ -30,6 +30,26 @@ export interface SourceProfile {
 }
 
 export const SOURCES: Record<SourceKey, SourceProfile> = {
+  dino: {
+    key: "dino", name: "디노 통합 DB", site: "우리 수집 결과",
+    blurb: "티어·연락등급이 매겨진 마스터. 이메일·전화·카카오·인포크·인링크·리틀리·DM 7개 채널을 한 행에 담는다.",
+    fields: [
+      { column: "인스타ID / instagram_handle", target: "social_account.handle", note: "없으면 샵ID 로 대체", rule: "auto" },
+      { column: "샵ID / shop_id", target: "social_account(platform=blogpay).handle", note: "인스타 없는 샵", rule: "auto" },
+      { column: "표시이름 / display_name / title", target: "creator.display_name", rule: "auto" },
+      { column: "티어", target: "creator.outreach_tier", note: "A~F. 팔로워 규모(tier)와 다른 축", rule: "keep" },
+      { column: "연락등급", target: "creator.contact_grade", rule: "keep" },
+      { column: "이메일 / 이메일2 / email / public_email", target: "contact_point(email)", note: "둘 다 넣는다", rule: "parse" },
+      { column: "전화 / phone", target: "contact_point(phone)", note: "콜드 금지 — 회신 후 후속용", rule: "parse" },
+      { column: "카카오", target: "contact_point(kakao)", rule: "parse" },
+      { column: "링크인바이오 / contact_link", target: "contact_point(inpock/inlink/linktree)", note: "호스트로 채널을 가른다", rule: "parse" },
+      { column: "inlink_url", target: "contact_point(inlink_form)", rule: "parse" },
+      { column: "dm_url / instagram_dm_url", target: "social_account.dm_url", note: "ig.me 딥링크 — 원클릭 DM", rule: "keep" },
+      { column: "대표자 / 사업자번호 / 주소", target: "creator.representative / biz_no / address", rule: "keep" },
+      { column: "공구징후", target: "creator.has_gonggu_sign", rule: "auto" },
+      { column: "소개 / 카테고리 / 팔로워", target: "social_account.bio_text / account_snapshot.*", rule: "parse" },
+    ],
+  },
   manual: {
     key: "manual", name: "직접 작성", site: "우리 양식",
     blurb: "우리가 정한 양식. 연락처를 담을 수 있는 유일한 경로 — 세 사이트 내보내기에는 이메일이 없다.",
@@ -137,7 +157,12 @@ export interface AnalyzedRow {
 
 /** 행 하나를 우리 스키마 조각으로 정규화한다. */
 export function normalizeRow(raw: Record<string, string>, source: SourceKey) {
-  const handle = normalizeHandle(pick(raw, ["handle", "instagram", "insta", "계정", "아이디"]) ?? "");
+  const handle = normalizeHandle(
+    pick(raw, ["handle", "instagram_handle", "인스타id", "instagram", "insta", "계정", "아이디"]) ?? "",
+  );
+  // 인스타 계정이 없는 blogpay 샵. 핸들 자리에 샵ID 를 쓰고 플랫폼으로 구분한다 —
+  // 자리를 안 만들면 779건이 통째로 오류 행이 된다.
+  const shopId = pick(raw, ["샵id", "shop_id"]);
   const followers = parseFollowers(pick(raw, ["팔로워", "followers"]));
   const following = parseFollowers(pick(raw, ["팔로잉", "following"]));
   const posts = parseFollowers(pick(raw, ["게시물", "posts", "posts_count"]));
@@ -150,7 +175,30 @@ export function normalizeRow(raw: Record<string, string>, source: SourceKey) {
   const alwaysOn = /^(y|yes|true|1|상시)$/i.test(pick(raw, ["always_on", "상시"]) ?? "");
   return {
     handle,
-    displayName: pick(raw, ["display_name", "seller", "name", "이름", "셀러"]),
+    handleIsShop: !handle && Boolean(shopId),
+    shopId,
+    shopUrl: pick(raw, ["shop_url", "샵url"]),
+    displayName: pick(raw, ["display_name", "표시이름", "title", "seller", "name", "이름", "셀러", "business_name"]),
+    outreachTier: pick(raw, ["티어", "tier_grade"]),
+    contactGrade: pick(raw, ["연락등급", "contact_grade"]),
+    hasGongguSign: /^(y|yes|true|1)$/i.test(pick(raw, ["공구징후", "gonggu_sign"]) ?? ""),
+    bizName: pick(raw, ["business_name", "사업자명", "상호"]),
+    representative: pick(raw, ["대표자", "representative"]),
+    bizNo: pick(raw, ["사업자번호", "business_registration_number"]),
+    address: pick(raw, ["주소", "address"]),
+    bio: pick(raw, ["소개", "bio", "bio_text"]),
+    dmUrl: pick(raw, ["dm_url", "instagram_dm_url"]),
+    phone: normalizePhone(pick(raw, ["전화", "phone", "휴대폰", "연락처"])),
+    kakao: pick(raw, ["카카오", "kakao", "카톡"]),
+    emails: [
+      normalizeEmail(pick(raw, ["email", "이메일", "메일"])),
+      normalizeEmail(pick(raw, ["이메일2", "email2", "public_email"])),
+    ].filter((v): v is string => Boolean(v)),
+    links: [
+      pick(raw, ["link_in_bio", "링크인바이오", "링크", "인포크", "링크페이지", "contact_link"]),
+      pick(raw, ["inlink_url", "인링크"]),
+      pick(raw, ["스마트스토어", "smartstore"]),
+    ].filter((v): v is string => Boolean(v)),
     platformUserId: pick(raw, ["account_id", "uuid", "source_pk", "id"]),
     slug: pick(raw, ["slug"]),
     region: pick(raw, ["region", "지역"]),
@@ -172,11 +220,11 @@ export function normalizeRow(raw: Record<string, string>, source: SourceKey) {
     closeDate: alwaysOn ? null : closeDate,
     alwaysOn,
     category: pick(raw, ["카테고리", "category"]),
-    sourceUrl: pick(raw, ["profile_url", "url", "detail_url"]),
+    sourceUrl: pick(raw, ["profile_url", "프로필url", "instagram_profile_url", "url", "detail_url", "source_url"]),
     // 연락처. 이게 없으면 임포트한 크리에이터에게 메일을 한 통도 보낼 수 없다 —
     // 도달 가능성 15점도 통째로 0 이 된다.
     email: normalizeEmail(pick(raw, ["email", "이메일", "메일"])),
-    emailSource: pick(raw, ["email_source", "이메일출처", "연락처출처"]),
+    emailSource: pick(raw, ["email_source", "이메일출처", "연락처출처", "수집출처"]),
     emailSourceUrl: pick(raw, ["email_source_url", "이메일출처url", "출처url"]),
     linkInBio: pick(raw, ["link_in_bio", "링크", "인포크", "링크페이지"]),
     source,
@@ -190,13 +238,36 @@ export function normalizeEmail(raw: string | null): string | null {
   return /^[^\s@,;]+@[^\s@,;.]+\.[^\s@,;]{2,}$/.test(v) ? v : null;
 }
 
-/** 링크페이지 주소로 채널을 가른다. 인포크와 링크트리는 제안 폼 구조가 다르다. */
-export function linkChannel(url: string | null): "inpock_offer" | "linktree_form" | null {
+/** 전화번호를 숫자만 남긴다. 형식이 아니면 null — 잘못된 번호는 저장하지 않는다. */
+export function normalizePhone(raw: string | null): string | null {
+  const d = String(raw ?? "").replace(/[^0-9]/g, "");
+  if (!d) return null;
+  // 국내 번호. 02 지역번호는 9자리, 나머지는 10~11자리다.
+  if (d.startsWith("82")) return normalizePhone("0" + d.slice(2));
+  if (d.length < 9 || d.length > 11) return null;
+  return d;
+}
+
+/**
+ * 링크 주소로 채널을 가른다.
+ *
+ * 제안 폼 구조가 서비스마다 다르다. 한 채널로 뭉치면 어떤 화면을 열어야 하는지
+ * 작업자가 매번 판단해야 하고, 채널별 정책(쿨다운·일일 상한)도 못 나눈다.
+ *   inpock  link.inpock.co.kr · inpk.link
+ *   inlink  inlink.to
+ *   그 외 링크페이지  litt.ly · linktr.ee · linkon.id · my.wiredy.io
+ * 카카오 채널(pf.kakao.com)과 스마트스토어는 링크페이지가 아니다.
+ */
+export function linkChannel(url: string | null): string | null {
   if (!url) return null;
-  const v = url.toLowerCase();
+  const v = url.toLowerCase().trim();
   if (!/^https?:\/\//.test(v) && !/\.[a-z]{2,}/.test(v)) return null;
-  if (v.includes("inpock")) return "inpock_offer";
-  return "linktree_form";
+  if (/inpock|inpk\.link/.test(v)) return "inpock_offer";
+  if (/inlink\.to/.test(v)) return "inlink_form";
+  if (/pf\.kakao\.com|open\.kakao\.com/.test(v)) return "kakao";
+  if (/smartstore\.naver\.com|shop\.blogpay\.co\.kr/.test(v)) return null; // 판매 채널이지 연락처가 아니다
+  if (/litt\.ly|linktr\.ee|linkon\.id|wiredy|bio\.link|taplink/.test(v)) return "linktree_form";
+  return null;
 }
 
 /** 미리보기로 화면에 내려보내는 행 수. 전체는 import_row 테이블에 담는다. */
@@ -437,36 +508,39 @@ function classifyRow(
 ): Omit<AnalyzedRow, "line" | "raw"> {
   const n = normalizeRow(raw, source);
 
-  if (!n.handle) {
+  // 인스타 계정이 없는 샵은 샵ID 를 키로 쓴다. 사업자 정보와 연락처가 있으므로
+  // 버리면 안 된다 — 실제 데이터에서 779건이 여기 해당한다.
+  const key = n.handle ?? (n.shopId ? `shop:${n.shopId}` : null);
+  if (!key) {
     const warn = slugWarning(n.slug);
     return {
       handle: null, verdict: "error", score: 0,
-      evidence: warn ?? "핸들 없음 — 매칭 키가 없어 저장하지 않습니다",
+      evidence: warn ?? "인스타ID 도 샵ID 도 없음 — 매칭 키가 없어 저장하지 않습니다",
       candidateId: null, candidateHandle: null,
     };
   }
   if (forbiddenHandleCol) {
-    return { handle: n.handle, verdict: "error", score: 0,
+    return { handle: key, verdict: "error", score: 0,
       evidence: SOURCES[source].forbiddenKeys![0].reason, candidateId: null, candidateHandle: null };
   }
 
   const incoming: Incoming = {
-    handle: n.handle, sourcePk: n.platformUserId, displayName: n.displayName, followers: n.followers, source,
+    handle: key, sourcePk: n.platformUserId, displayName: n.displayName, followers: n.followers, source,
   };
   const best = findBest(index, incoming);
   if (!best) {
-    return { handle: n.handle, verdict: "new", score: 0, evidence: "일치하는 계정 없음 — 신규 등록", candidateId: null, candidateHandle: null };
+    return { handle: key, verdict: "new", score: 0, evidence: "일치하는 계정 없음 — 신규 등록", candidateId: null, candidateHandle: null };
   }
 
   // 소스 PK 는 같은데 핸들이 다르면 핸들 변경이다. 자동 병합하지 않고 사람이 본다.
   if (best.m.handleChanged) {
-    return { handle: n.handle, verdict: "review", score: 0.9,
+    return { handle: key, verdict: "review", score: 0.9,
       evidence: best.m.evidence, candidateId: best.cand.creator_id, candidateHandle: best.cand.handle, handleChanged: true };
   }
 
   const verdict = decide(best.m.score, best.m.deterministic);
   return {
-    handle: n.handle, verdict, score: best.m.score, evidence: best.m.evidence,
+    handle: key, verdict, score: best.m.score, evidence: best.m.evidence,
     candidateId: verdict === "new" ? null : best.cand.creator_id,
     candidateHandle: verdict === "new" ? null : best.cand.handle,
   };
@@ -625,6 +699,42 @@ export async function batchProgress(batchId: string) {
   );
 }
 
+/**
+ * 두 크리에이터를 하나로 합친다.
+ *
+ * 같은 플랫폼에서 핸들은 고유하므로, 핸들이 겹치면 같은 사람이다. 연락처와
+ * 소스 참조를 살아남는 쪽으로 옮기고 사라지는 쪽에 merged_into 를 건다 —
+ * 조회는 전부 merged_into IS NULL 로 거른다.
+ *
+ * 지우지 않는다. 잘못 합쳤을 때 되돌릴 수 있어야 한다.
+ */
+async function mergeCreators(
+  c: { query: (t: string, p?: unknown[]) => Promise<{ rows: Record<string, unknown>[] }> },
+  fromId: string,
+  toId: string,
+  userId: string,
+  handle: string,
+) {
+  if (fromId === toId) return;
+  await c.query(
+    `UPDATE contact_point SET creator_id=$2 WHERE creator_id=$1
+      AND NOT EXISTS (SELECT 1 FROM contact_point x
+                       WHERE x.creator_id=$2 AND x.channel=contact_point.channel
+                         AND x.value_norm=contact_point.value_norm)`, [fromId, toId]);
+  await c.query(`DELETE FROM contact_point WHERE creator_id=$1`, [fromId]);
+  await c.query(
+    `UPDATE source_ref SET entity_id=$2 WHERE entity='creator' AND entity_id=$1
+      AND NOT EXISTS (SELECT 1 FROM source_ref x
+                       WHERE x.entity='creator' AND x.entity_id=$2
+                         AND x.source=source_ref.source AND x.source_pk=source_ref.source_pk)`, [fromId, toId]);
+  await c.query(`UPDATE deal SET creator_id=$2 WHERE creator_id=$1`, [fromId, toId]);
+  await c.query(`UPDATE creator SET merged_into=$2, updated_at=now() WHERE id=$1`, [fromId, toId]);
+  await c.query(
+    `INSERT INTO audit_log (actor_id, actor_kind, entity, entity_id, action, reason)
+     VALUES ($1,'system','creator',$2,'merge',$3)`,
+    [userId, fromId, `핸들 '${handle}' 충돌 — ${toId} 로 병합`]);
+}
+
 type Normalized = ReturnType<typeof normalizeRow>;
 
 /** 행 하나를 본 테이블에 반영한다. 트랜잭션 하나. */
@@ -639,66 +749,120 @@ async function applyRow(
     let accountId: string | null = null;
     let outcome: "created" | "merged" = "merged";
 
+    // 인스타 계정이 없는 샵은 platform 으로 구분한다. 핸들 자리에 샵ID 가 들어간다.
+    const platform = n.handleIsShop ? "blogpay" : "instagram";
+    const key = n.handle ?? `shop:${n.shopId}`;
+    const profileUrl =
+      n.sourceUrl ?? n.shopUrl ?? (n.handle ? `https://www.instagram.com/${n.handle}` : `https://${n.shopId}.shop.blogpay.co.kr/`);
+
     if (!creatorId) {
       const cr = (await c.query(
-        `INSERT INTO creator (display_name, tier, home_region, is_curated, owner_user_id)
-         VALUES ($1,'micro',$2,$3,$4) RETURNING id`,
-        [n.displayName ?? n.handle, n.region, n.curated, userId])).rows[0];
+        `INSERT INTO creator (display_name, tier, home_region, is_curated, owner_user_id,
+                              outreach_tier, contact_grade, has_gonggu_sign,
+                              biz_name, representative, biz_no, address, shop_url)
+         VALUES ($1,'micro',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+        [n.displayName ?? key, n.region, n.curated, userId,
+         n.outreachTier, n.contactGrade, n.hasGongguSign,
+         n.bizName, n.representative, n.bizNo, n.address, n.shopUrl])).rows[0];
       creatorId = cr.id as string;
       const acc = (await c.query(
-        `INSERT INTO social_account (creator_id, platform, platform_user_id, handle, handle_raw, profile_url)
-         VALUES ($1,'instagram',$2,$3,$4,$5)
+        `INSERT INTO social_account (creator_id, platform, platform_user_id, handle, handle_raw, profile_url, bio_text, dm_url)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
          ON CONFLICT (platform, handle) DO UPDATE SET handle_raw=EXCLUDED.handle_raw
          RETURNING id`,
-        [creatorId, n.platformUserId, n.handle, `@${n.handle}`, n.sourceUrl ?? `https://www.instagram.com/${n.handle}`])).rows[0];
+        [creatorId, platform, n.platformUserId, key, n.handle ? `@${n.handle}` : key,
+         profileUrl, n.bio, n.dmUrl])).rows[0];
       accountId = acc.id as string;
       outcome = "created";
     } else {
-      const acc = (await c.query(`SELECT id, handle FROM social_account WHERE creator_id=$1 LIMIT 1`, [creatorId])).rows[0];
+      const acc = (await c.query(
+        `SELECT id, handle FROM social_account WHERE creator_id=$1 ORDER BY (platform='instagram') DESC LIMIT 1`,
+        [creatorId])).rows[0];
       accountId = acc?.id ?? null;
+
       // 핸들이 바뀌었으면 alias 이력에 남기고 현재 핸들을 갱신한다.
-      if (acc && acc.handle !== n.handle) {
-        await c.query(
-          `INSERT INTO handle_alias (social_account_id, handle) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [acc.id, acc.handle]);
-        await c.query(`UPDATE social_account SET handle=$2, profile_url=$3 WHERE id=$1`,
-          [acc.id, n.handle, `https://www.instagram.com/${n.handle}`]);
+      if (acc && n.handle && acc.handle !== key) {
+        // 새 핸들을 이미 다른 계정이 갖고 있으면, 같은 플랫폼에서 핸들은 고유하므로
+        // 두 크리에이터는 같은 사람이다. 이름을 바꾸려 하면 UNIQUE 제약에 걸려
+        // 행이 통째로 버려진다 — 실제 데이터에서 14건이 이렇게 사라졌다. 병합한다.
+        const owner = (await c.query(
+          `SELECT id, creator_id FROM social_account WHERE platform=$1 AND handle=$2`, [platform, key])).rows[0];
+
+        if (owner && owner.creator_id !== creatorId) {
+          await mergeCreators(c, creatorId, owner.creator_id as string, userId, key);
+          creatorId = owner.creator_id as string;
+          accountId = owner.id as string;
+        } else if (!owner) {
+          await c.query(
+            `INSERT INTO handle_alias (social_account_id, handle) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
+            [acc.id, acc.handle]);
+          await c.query(`UPDATE social_account SET handle=$2, profile_url=$3 WHERE id=$1`,
+            [acc.id, key, profileUrl]);
+        }
       }
       if (n.curated) await c.query(`UPDATE creator SET is_curated=true WHERE id=$1`, [creatorId]);
+      // 비어 있는 칸만 채운다. 이미 있는 값을 덮으면 사람이 고친 내용이 날아간다.
+      await c.query(
+        `UPDATE creator SET
+           outreach_tier   = COALESCE(outreach_tier, $2),
+           contact_grade   = COALESCE(contact_grade, $3),
+           has_gonggu_sign = has_gonggu_sign OR $4,
+           biz_name        = COALESCE(biz_name, $5),
+           representative  = COALESCE(representative, $6),
+           biz_no          = COALESCE(biz_no, $7),
+           address         = COALESCE(address, $8),
+           shop_url        = COALESCE(shop_url, $9),
+           updated_at      = now()
+         WHERE id=$1`,
+        [creatorId, n.outreachTier, n.contactGrade, n.hasGongguSign,
+         n.bizName, n.representative, n.bizNo, n.address, n.shopUrl]);
+      if (accountId && (n.bio || n.dmUrl)) {
+        await c.query(
+          `UPDATE social_account SET bio_text = COALESCE($2, bio_text), dm_url = COALESCE($3, dm_url) WHERE id=$1`,
+          [accountId, n.bio, n.dmUrl]);
+      }
     }
 
-    if (accountId && n.linkInBio) {
-      await c.query(`UPDATE social_account SET link_in_bio=$2 WHERE id=$1 AND $2 <> ''`, [accountId, n.linkInBio]);
+    const bioLink = n.linkInBio ?? (n.links ?? [])[0] ?? null;
+    if (accountId && bioLink) {
+      await c.query(`UPDATE social_account SET link_in_bio = COALESCE(link_in_bio, $2) WHERE id=$1`, [accountId, bioLink]);
     }
 
     // 연락처. contact_point 는 source_type · source_url · collected_by 가 NOT NULL 이다 —
     // 어디서 얻었는지 답할 수 없는 연락처는 저장하지 않는다는 설계다. CSV 에 출처가
     // 없으면 프로필 URL 로 기록하고, 대체했다는 사실을 collect_note 에 남긴다.
+    //
+    // 채널을 7종으로 나눠 담는다. 한 칸에 뭉치면 채널별 정책(콜드 허용·쿨다운·
+    // 일일 상한)을 적용할 수 없고, 작업자가 어떤 화면을 열지도 알 수 없다.
     if (creatorId) {
-      const profile = n.sourceUrl ?? `https://www.instagram.com/${n.handle}`;
       const fellBack = !n.emailSourceUrl;
-      const srcUrl = n.emailSourceUrl ?? profile;
-      const srcType = n.emailSource ?? "bio_public";
+      const srcUrl = n.emailSourceUrl ?? profileUrl;
       const note = fellBack ? "출처 URL 미기재 — 프로필 URL 로 기록" : null;
+      const srcType = n.emailSource && /^(bio_public|link_page_public|inbound_apply|business_card|referral)$/.test(n.emailSource)
+        ? n.emailSource
+        : "bio_public";
 
-      if (n.email) {
+      const addContact = async (
+        channel: string, value: string, sourceType: string, isPrimary = false,
+      ) => {
         await c.query(
           `INSERT INTO contact_point
              (creator_id, channel, value, value_norm, source_type, source_url, collected_at,
               collected_by, collect_note, consent_status, verification, is_primary)
-           VALUES ($1,'email',$2,$2,$3,$4,now(),$5,$6,'implied_public','unverified',true)
+           VALUES ($1,$2,$3,$4,$5,$6,now(),$7,$8,'implied_public','unverified',$9)
            ON CONFLICT (creator_id, channel, value_norm) DO UPDATE
              SET source_url = EXCLUDED.source_url, collect_note = EXCLUDED.collect_note`,
-          [creatorId, n.email, srcType, srcUrl, userId, note]);
+          [creatorId, channel, value, value.toLowerCase(), sourceType, srcUrl, userId, note, isPrimary]);
+      };
+
+      for (const [i, addr] of (n.emails ?? []).entries()) {
+        await addContact("email", addr, srcType, i === 0);
       }
-      const linkCh = linkChannel(n.linkInBio);
-      if (linkCh && n.linkInBio) {
-        await c.query(
-          `INSERT INTO contact_point
-             (creator_id, channel, value, value_norm, source_type, source_url, collected_at,
-              collected_by, collect_note, consent_status, verification, is_primary)
-           VALUES ($1,$2,$3,$4,'link_page_public',$5,now(),$6,$7,'implied_public','unverified',false)
-           ON CONFLICT (creator_id, channel, value_norm) DO NOTHING`,
-          [creatorId, linkCh, n.linkInBio, n.linkInBio.toLowerCase(), profile, userId, note]);
+      if (n.phone) await addContact("phone", n.phone, srcType);
+      if (n.kakao) await addContact("kakao", n.kakao, "link_page_public");
+      for (const link of n.links ?? []) {
+        const ch = linkChannel(link);
+        if (ch) await addContact(ch, link, "link_page_public");
       }
     }
 

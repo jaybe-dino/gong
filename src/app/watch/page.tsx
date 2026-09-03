@@ -26,7 +26,7 @@ const COND: Record<string, string> = {
 };
 const HEALTH_LABEL: Record<string, string> = {
   ok: "정상", dormant: "휴면 추정", stale: "데이터 오래됨", unreachable: "연락 수단 없음",
-  bounced: "바운스 누적", dead: "계정 비활성", suppressed: "수신거부",
+  bounced: "바운스 누적", bad_email: "메일 안 받는 도메인", dead: "계정 비활성", suppressed: "수신거부",
 };
 
 const TARGET_KIND: Record<string, string> = { brand: "브랜드", seller: "셀러", keyword: "키워드", category: "카테고리" };

@@ -1,6 +1,7 @@
 import { all, one } from "./db";
 import { evaluate, type ChannelPolicy, type GateResult, type SuppressionRow } from "./policy-gate";
 import { render, type Rendered } from "./template";
+import { sqlRank } from "./channels/kinds";
 
 /**
  * 발송 대상 산출과 게이트 평가.
@@ -53,8 +54,7 @@ export async function loadSendCandidates(campaignId: string) {
        JOIN creator c ON c.id=m.creator_id
        JOIN social_account sa ON sa.creator_id=c.id
        LEFT JOIN LATERAL (SELECT * FROM contact_point x WHERE x.creator_id=c.id
-          ORDER BY CASE x.channel WHEN 'email' THEN 0 WHEN 'inpock_offer' THEN 1
-                                  WHEN 'linktree_form' THEN 2 ELSE 3 END LIMIT 1) cp ON true
+          ORDER BY ${sqlRank("x.channel")} LIMIT 1) cp ON true
        LEFT JOIN LATERAL (SELECT max(msg.sent_at) AS last_contact_at FROM message msg
           JOIN campaign_member mm ON mm.id=msg.campaign_member_id
          WHERE mm.creator_id=c.id AND msg.direction='out') lc ON true

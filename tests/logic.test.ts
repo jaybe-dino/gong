@@ -135,17 +135,27 @@ test("소스가 다르면 PK 번호가 겹쳐도 같은 사람이 아니다", ()
 test("구두점만 다르면 병합 후보, 표시명이 다르면 검토로 내려간다", () => {
   const same = D.scoreMatch(
     { handle: "livingnote.k", displayName: "리빙노트", followers: 62000 },
-    { id: "x", handle: "livingnote_k", display_name: "리빙노트", followers: 62000 },
+    { id: "y", handle: "livingnote_k", display_name: "리빙노트", followers: 62000 },
   );
-  assert.ok(same.score >= 0.95, `점수 ${same.score}`);
   assert.equal(D.decide(same.score, same.deterministic), "merge");
 
-  const dup = D.scoreMatch(
-    { handle: "mom_dailylog", displayName: "엄마의하루", followers: 105000 },
-    { id: "x", handle: "mom_dailylog", display_name: "소소한하루", followers: 108000 },
+  // 구두점이 다르면 서로 다른 계정일 수 있다 — 표시명까지 다르면 사람이 본다.
+  const diff = D.scoreMatch(
+    { handle: "livingnote.k", displayName: "전혀다른이름", followers: 62000 },
+    { id: "y", handle: "livingnote_k", display_name: "리빙노트", followers: 62000 },
   );
-  assert.equal(D.decide(dup.score, dup.deterministic), "review", "핸들이 같아도 표시명이 다르면 사람이 본다");
-  assert.match(dup.evidence, /동명이인/);
+  assert.equal(D.decide(diff.score, diff.deterministic), "review");
+
+  // 핸들이 완전히 같으면 같은 계정이다 — 같은 플랫폼에서 핸들은 고유하다.
+  // 표시명이 달라도 병합하고, 그 사실만 근거에 남긴다. 실제 데이터에서 이걸
+  // 검토 큐로 보냈더니 한 번의 임포트에 772건이 쌓였다 — 그러면 아무도 안 본다.
+  const renamed = D.scoreMatch(
+    { handle: "livingnote.k", displayName: "전혀다른이름", followers: 62000 },
+    { id: "y", handle: "livingnote.k", display_name: "리빙노트", followers: 62000 },
+  );
+  assert.equal(D.decide(renamed.score, renamed.deterministic), "merge");
+  assert.equal(renamed.nameChanged, true);
+  assert.match(renamed.evidence, /표시명 변경/);
 });
 
 test("전혀 다른 핸들은 신규", () => {

@@ -6,6 +6,7 @@ import { igUrl } from "../handle";
 import * as channels from "../channels";
 import { gmail } from "../channels";
 import { MAIL } from "../outreach";
+import { LINK_FORM_CHANNELS, sqlList } from "../channels/kinds";
 
 /**
  * 시퀀스 워커.
@@ -97,7 +98,7 @@ export async function processMember(m: DueMember, now: Date): Promise<Outcome> {
     if (!hasEmail) {
       const alt = await one<{ channel: string }>(
         `SELECT channel FROM contact_point
-          WHERE creator_id=$1 AND channel IN ('inpock_offer','linktree_form') AND consent_status <> 'opt_out' LIMIT 1`,
+          WHERE creator_id=$1 AND channel IN (${sqlList(LINK_FORM_CHANNELS)}) AND consent_status <> 'opt_out' LIMIT 1`,
         [m.creator_id],
       );
       channel = alt?.channel ?? "instagram_dm";

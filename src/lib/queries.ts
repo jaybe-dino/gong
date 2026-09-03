@@ -1,6 +1,7 @@
 import { all, one } from "./db";
 import { fitScore, relatedCategories, timing, type ScoreInput, type ScoreResult, type Timing } from "./score";
 import type { ChannelPolicy, SuppressionRow } from "./policy-gate";
+import { LINK_FORM_CHANNELS, REACHABLE_CHANNELS, sqlList, sqlRank } from "./channels/kinds";
 
 /**
  * 화면이 쓰는 조회 계층.
@@ -105,7 +106,7 @@ export async function loadCreators(opts: {
   if (opts.reachable) {
     filters.push(`EXISTS (SELECT 1 FROM contact_point x
                            WHERE x.creator_id = c.id
-                             AND x.channel IN ('email','inpock_offer','linktree_form')
+                             AND x.channel IN (${sqlList(REACHABLE_CHANNELS)})
                              AND x.consent_status <> 'opt_out')`);
     filters.push(`COALESCE(cf.excluded, false) = false`);
   }
@@ -209,7 +210,7 @@ export async function loadCreators(opts: {
        FROM page p
        LEFT JOIN LATERAL (
          SELECT CASE WHEN bool_or(channel='email') THEN 'email'
-                     WHEN bool_or(channel IN ('inpock_offer','linktree_form')) THEN 'inpock'
+                     WHEN bool_or(channel IN (${sqlList(LINK_FORM_CHANNELS)})) THEN 'inpock'
                      WHEN bool_or(channel='instagram_dm') THEN 'dm' END AS reach,
                 bool_or(channel='email' AND verification='valid') AS email_verified
            FROM contact_point WHERE creator_id = p.creator_id
@@ -333,9 +334,7 @@ export async function listCampaigns() {
 }
 
 export async function channelPolicies(): Promise<ChannelPolicy[]> {
-  return all<ChannelPolicy>(`SELECT * FROM channel_policy ORDER BY
-    CASE channel WHEN 'email' THEN 0 WHEN 'instagram_dm' THEN 1 WHEN 'inpock_offer' THEN 2
-                 WHEN 'linktree_form' THEN 3 WHEN 'kakao' THEN 4 ELSE 5 END`);
+  return all<ChannelPolicy>(`SELECT * FROM channel_policy ORDER BY ${sqlRank("channel")}, channel`);
 }
 
 export async function suppressions(): Promise<SuppressionRow[]> {

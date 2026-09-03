@@ -40,7 +40,8 @@ test("스키마와 시드가 기대한 모양으로 들어갔다", async () => {
   assert.equal(await n("creator"), 1742);
   assert.ok((await n("deal")) > 5000);
   assert.equal(await n("campaign"), 4);
-  assert.equal(await n("channel_policy"), 6);
+  // email · instagram_dm · inpock_offer · inlink_form · linktree_form · kakao · sms · phone
+  assert.equal(await n("channel_policy"), 8);
   assert.equal(await n("pipeline_stage"), 11);
   // 상태 3축이 모두 채워져 있어야 한다
   const m = await one<{ stages: string; engines: string }>(
@@ -280,9 +281,18 @@ test("임포트 — 사전에 없던 브랜드는 새 브랜드 이벤트를 만
 
 test("정책·수신거부 조회 헬퍼", async () => {
   const pol = await channelPolicies();
-  assert.equal(pol.length, 6);
+  assert.equal(pol.length, 8);
   assert.equal(pol.find((p) => p.channel === "instagram_dm")!.allows_cold, false);
   assert.equal(pol.find((p) => p.channel === "email")!.automation_mode, "auto");
+  // 링크폼 채널은 전부 콜드 금지 · 사람이 실행한다 — 공식 제출 API 가 없다.
+  for (const ch of ["inpock_offer", "inlink_form", "linktree_form"]) {
+    const p2 = pol.find((x) => x.channel === ch);
+    assert.ok(p2, `${ch} 정책이 있어야 한다`);
+    assert.equal(p2!.allows_cold, false, ch);
+    assert.equal(p2!.automation_mode, "manual_task", ch);
+  }
+  // 이메일이 맨 앞이어야 한다 — 자동 발송이 가능한 유일한 채널이다.
+  assert.equal(pol[0].channel, "email");
   assert.ok((await suppressions()).length > 0);
 });
 

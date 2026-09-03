@@ -1,5 +1,6 @@
 import dns from "node:dns/promises";
 import { all, one, run } from "../db";
+import { REACHABLE_CHANNELS, sqlList } from "../channels/kinds";
 
 /**
  * 유효성 점검 에이전트.
@@ -15,6 +16,7 @@ import { all, one, run } from "../db";
  *   suppressed  수신거부·DNC 등재 — 연락 금지
  *   dead        계정 비활성 표시
  *   bounced     바운스 누적
+ *   bad_email   이메일 도메인이 메일을 받지 않음 (다른 채널은 살아 있을 수 있다)
  *   unreachable 연락 수단 없음 (DM 만 남음)
  *   stale       최신 스냅샷이 오래됨
  *   dormant     케이던스 이탈 (경과일 > 평균 간격 × 2.2)
@@ -51,7 +53,7 @@ const STATE_SQL = `
     SELECT c.id AS creator_id, sa.handle, sa.is_active,
            v.captured_at, v.days_since_last, v.avg_interval_days,
            (SELECT count(*) FROM contact_point cp
-             WHERE cp.creator_id = c.id AND cp.channel IN ('email','inpock_offer','linktree_form')
+             WHERE cp.creator_id = c.id AND cp.channel IN (${sqlList(REACHABLE_CHANNELS)})
                AND cp.consent_status <> 'opt_out') AS reachable_n,
            (SELECT coalesce(max(cp.bounce_count), 0) FROM contact_point cp WHERE cp.creator_id = c.id) AS bounces,
            EXISTS (
