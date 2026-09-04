@@ -8,6 +8,7 @@ import { evaluateCandidate, loadCampaignInfo, loadGateInputs, loadSendCandidates
 import { classifyReply } from "./jobs/inbound-sync";
 import { reportActionBlock } from "./jobs/circuit-breaker";
 import { detectChanges } from "./jobs/detect-changes";
+import { tick as sequenceTick } from "./jobs/sequence-worker";
 import { invalidateFitForBatch, refreshFit, type FitProgress } from "./jobs/refresh-fit";
 import { gmail } from "./channels";
 import { interestEffects, INTEREST, ENGINE } from "./states";
@@ -143,92 +144,48 @@ export async function markEventsRead() {
  * 화면에서 통과했더라도 그 사이 수신거부가 등재됐을 수 있으므로 대상마다 게이트를
  * 다시 통과시킨다. 막힌 건은 gate_block 에 사유를 남긴다.
  */
+/**
+ * 발송 시작.
+ *
+ * 예전에는 이 함수가 message 를 'sent' 로 직접 기록했다 — 채널 어댑터를 부르지
+ * 않았으므로 메일은 한 통도 나가지 않는데 나갔다고 남았다. Gmail 을 연동해도
+ * 마찬가지였다. 그러면 회신율 분모가 부풀고, 재접촉 쿨다운이 걸려 진짜 발송 때
+ * 그 사람을 건너뛴다.
+ *
+ * 발송 경로를 두 개 두면 한쪽만 고치게 된다. 대상을 지금 만기로 만들고
+ * 시퀀스 워커를 한 틱 돌린다 — 렌더링·게이트·어댑터 호출·기록이 전부
+ * 검증된 한 경로로 지나간다.
+ */
 export async function startSend(formData: FormData) {
   const campaignId = String(formData.get("campaignId") ?? "");
   if (!campaignId) return;
 
-  const campaign = await loadCampaignInfo(campaignId);
-  if (!campaign) return;
+  // 아직 컨택하지 않은 살아 있는 대상을 지금 만기로 만든다.
+  await run(
+    `UPDATE campaign_member SET next_action_at = now() - interval '1 minute'
+      WHERE campaign_id=$1 AND engine_state > 0
+        AND (next_action_at IS NULL OR next_action_at > now())`,
+    [campaignId],
+  );
 
-  const inputs = await loadGateInputs();
-  const candidates = await loadSendCandidates(campaignId);
-  const sender = inputs.sender;
-  const now = new Date();
+  const before = await one<{ n: number }>(
+    `SELECT count(*)::int AS n FROM outreach_task WHERE state='queued'`);
+  const stats = await sequenceTick({ limit: 500 });
+  const after = await one<{ n: number }>(
+    `SELECT count(*)::int AS n FROM outreach_task WHERE state='queued'`);
+  const tasks = Math.max(0, (after?.n ?? 0) - (before?.n ?? 0));
 
-  let queued = 0;
-  let blocked = 0;
-  let tasks = 0;
-
-  for (const cand of candidates) {
-    // 회신을 되돌릴 열쇠. 없으면 지금 만든다 — 수신거부 URL 도 이 토큰을 쓴다.
-    if (!cand.reply_token) {
-      cand.reply_token = gmail.newReplyToken();
-      await run(`UPDATE campaign_member SET reply_token=$2 WHERE id=$1`, [cand.member_id, cand.reply_token]);
-    }
-    const ev = evaluateCandidate(cand, campaign, inputs, now);
-
-    if (!ev.gate.ok) {
-      blocked++;
-      await run(`INSERT INTO gate_block (campaign_member_id, channel, failed_check, detail) VALUES ($1,$2,$3,$4)`,
-        [cand.member_id, ev.channel, ev.gate.blocked!.check, ev.gate.blocked!.detail]);
-      continue;
-    }
-
-    // 콜드 자동 발송이 불가한 채널은 작업 큐로만 나간다.
-    if (ev.policy.automation_mode === "manual_task") {
-      await run(
-        `INSERT INTO outreach_task (campaign_member_id, channel, sender_id, rendered_subject, rendered_body, target_url, state, due_at)
-         VALUES ($1,$2,NULL,$3,$4,$5,'queued',$6)`,
-        [cand.member_id, ev.channel, ev.rendered!.subject, ev.rendered!.body,
-         `https://www.instagram.com/${cand.handle}`, nextBusinessSlot(now).toISOString()],
-      );
-      tasks++;
-      continue;
-    }
-
-    await tx(async (c) => {
-      await c.query(
-        `INSERT INTO message (campaign_member_id, sender_id, channel, direction, from_name, subject, body, status)
-         VALUES ($1,$2,'email','out',$3,$4,$5,'sent')`,
-        [cand.member_id, sender?.id ?? null, sender?.display_name ?? "Dinostudio", ev.rendered!.subject, ev.rendered!.body],
-      );
-      await c.query(
-        `UPDATE campaign_member SET engine_state=$2::smallint, current_step = current_step + 1,
-                first_sent_at = COALESCE(first_sent_at, now()), last_sent_at = now(),
-                stage_id = GREATEST(stage_id, (SELECT id FROM pipeline_stage WHERE key='contacted'))
-          WHERE id=$1 AND engine_state > 0`,
-        [cand.member_id, ENGINE.IN_SEQUENCE],
-      );
-      if (sender) {
-        await c.query(
-          `UPDATE sender SET sent_today = CASE WHEN sent_date=CURRENT_DATE THEN sent_today+1 ELSE 1 END,
-                             sent_date=CURRENT_DATE WHERE id=$1`,
-          [sender.id],
-        );
-      }
-    });
-    queued++;
-    if (sender) sender.sent_today++;
-  }
-
-  await audit("campaign", campaignId, "send", `queued=${queued} blocked=${blocked} tasks=${tasks}`);
+  await audit("campaign", campaignId, "send",
+    `sent=${stats.sent} tasks=${tasks} blocked=${stats.blocked} failed=${stats.failed}`);
   revalidatePath("/dashboard");
   revalidatePath("/queue");
-  revalidatePath("/campaigns");
-  revalidatePath("/policy");
-  redirect(`/send?step=3&campaign=${campaignId}&sent=${queued}&blocked=${blocked}&tasks=${tasks}`);
+  revalidatePath("/send");
+  redirect(
+    `/send?step=3&campaign=${campaignId}&sent=${stats.sent}&blocked=${stats.blocked}` +
+    `&tasks=${tasks}&failed=${stats.failed}`,
+  );
 }
 
-// ---------- 임포트 ----------
-
-/**
- * 업로드는 청크로 받는다.
- *
- * 예전에는 File 을 서버 액션 하나로 넘겼다. Next 의 기본 본문 한도가 1 MB 라
- * 1.9만 행(2.8 MB) 파일이 413 으로 튕겼고, 화면에는 원인이 안 보이는
- * "Server Components render" 오류만 떴다. Vercel 은 요청 본문을 4.5 MB 로
- * 막으니 한도를 올리는 것만으로는 곧 또 막힌다.
- */
 export async function beginUpload(source: string, filename: string, headerLine: string): Promise<string> {
   const src = source as SourceKey;
   if (!SOURCES[src]) throw new Error("알 수 없는 소스입니다");

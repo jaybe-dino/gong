@@ -244,12 +244,15 @@ export async function processMember(m: DueMember, now: Date): Promise<Outcome> {
 
   await tx(async (c) => {
     await c.query(
+      // dry-run 은 'sent' 로 기록하지 않는다. 실제로 나가지 않았는데 나갔다고 남기면
+      // 회신율 분모가 부풀고, 재접촉 쿨다운이 걸려 진짜 발송 때 이 사람을 건너뛴다.
       `INSERT INTO message
          (campaign_member_id, contact_point_id, sender_id, channel, direction, step_id, variant_id,
-          thread_key, provider_msg_id, from_name, subject, body)
-       VALUES ($1,$2,$3,$4,'out',$5,$6,$7,$8,$9,$10,$11)`,
+          thread_key, provider_msg_id, from_name, subject, body, status)
+       VALUES ($1,$2,$3,$4,'out',$5,$6,$7,$8,$9,$10,$11,$12)`,
       [m.id, contact?.id ?? null, sender?.id ?? null, step.channel, step.id, variant.id,
-       sendRes.threadKey, sendRes.providerMessageId, senderInfo.displayName, outbound.subject, outbound.body],
+       sendRes.threadKey, sendRes.providerMessageId, senderInfo.displayName, outbound.subject, outbound.body,
+       sendRes.dryRun ? "dry_run" : "sent"],
     );
     if (sender) {
       await c.query(

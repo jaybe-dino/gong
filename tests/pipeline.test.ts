@@ -483,8 +483,15 @@ test("회신 분류 3 — 확정으로 옮기고 어트리뷰션 토큰을 발�
 
 test("서킷브레이커 — 임계를 넘으면 발신 계정을 정지시킨다", async () => {
   await run(`UPDATE circuit_breaker SET halt_at = 0, warn_at = 0 WHERE metric='bounce_rate'`);
-  // 바운스 이벤트를 만들어 비율을 올린다
-  const msg = await one<{ id: string }>(`SELECT id FROM message WHERE direction='out' LIMIT 1`);
+  // 바운스 이벤트를 만들어 비율을 올린다.
+  // 창(7일) 안의 실제 발송 건이어야 한다 — ORDER BY 없는 LIMIT 1 은 실행마다
+  // 다른 행을 집고, dry-run 은 브레이커가 세지 않으므로 비율이 0 이 된다.
+  const msg = await one<{ id: string }>(
+    `SELECT id FROM message
+      WHERE direction='out' AND channel='email' AND status='sent'
+        AND sent_at >= now() - interval '3 days'
+      ORDER BY sent_at DESC LIMIT 1`);
+  assert.ok(msg, "최근 7일 안의 실제 발송 건이 있어야 한다");
   await run(`INSERT INTO message_event (message_id, type) VALUES ($1,'bounce_hard')`, [msg!.id]);
 
   const r = await breaker.tick();
@@ -872,4 +879,58 @@ test("마이그레이션이 밀려 있어도 조회가 죽지 않는다", async 
   const r = await loadCreators({ limit: 5, order: "followers" });
   assert.ok(r.rows.length > 0);
   assert.ok(r.total > 0);
+});
+
+// ---------- 발송 경로 ----------
+
+test("발송은 어댑터를 거치고, dry-run 을 'sent' 로 기록하지 않는다", async () => {
+  // 회귀: /send 의 startSend 가 채널 어댑터를 부르지 않고 message 를 'sent' 로
+  // 직접 기록했다. 메일은 한 통도 안 나가는데 나갔다고 남는다 — 회신율 분모가
+  // 부풀고, 재접촉 쿨다운이 걸려 진짜 발송 때 그 사람을 건너뛴다.
+  const camp = await one<{ id: string }>(`SELECT id FROM campaign ORDER BY created_at LIMIT 1`);
+  assert.ok(camp, "캠페인이 있어야 한다");
+
+  const m = await one<{ id: string }>(
+    `UPDATE campaign_member SET next_action_at = now() - interval '1 minute', engine_state = 1, current_step = 0
+      WHERE id = (SELECT cm.id FROM campaign_member cm
+                    JOIN contact_point cp ON cp.creator_id = cm.creator_id AND cp.channel='email'
+                   WHERE cm.engine_state > 0 LIMIT 1)
+      RETURNING id`);
+  assert.ok(m, "이메일 보유 대상이 있어야 한다");
+  await run(`UPDATE campaign_member SET next_action_at = now() + interval '1 day'
+              WHERE id <> $1 AND next_action_at IS NOT NULL AND next_action_at <= now()`, [m!.id]);
+
+  const before = await n("message");
+  const r = await seq.tick({ limit: 5 });
+  assert.equal(r.processed, 1, JSON.stringify(r));
+
+  if (r.sent > 0) {
+    assert.ok((await n("message")) > before);
+    const row = await one<{ status: string; provider_msg_id: string | null }>(
+      `SELECT status, provider_msg_id FROM message WHERE campaign_member_id=$1 ORDER BY sent_at DESC LIMIT 1`, [m!.id]);
+    // Gmail 자격 증명이 없으면 dry-run 이다. 그 사실이 기록에 남아야 한다.
+    assert.equal(row!.status, "dry_run", "자격 증명 없이 보낸 것은 dry_run 이어야 한다");
+    assert.match(row!.provider_msg_id ?? "", /^dry_/);
+  }
+});
+
+test("채널마다 그 채널의 템플릿을 쓴다", async () => {
+  // 회귀: 게이트 입력이 이메일 템플릿 하나만 들고 있어서, 인포크·인링크 작업
+  // 큐에도 이메일 인사말이 그대로 들어갔다. 인포크 전용 템플릿이 DB 에 있는데도.
+  const { loadGateInputs } = await import("../src/lib/outreach.ts");
+  const inputs = await loadGateInputs();
+  assert.ok(Array.isArray(inputs.tpl), "채널별로 여러 개를 들고 있어야 한다");
+
+  const byCh = Object.fromEntries(inputs.tpl.map((t) => [t.channel, t]));
+  assert.ok(byCh["email"], "이메일 템플릿");
+  assert.ok(byCh["inpock_offer"], "인포크 템플릿");
+  assert.notEqual(byCh["inpock_offer"].body, byCh["email"].body, "두 채널의 문안이 같으면 안 된다");
+
+  // 인포크 작업 큐에 들어간 문안이 인포크 템플릿에서 나왔는지
+  const task = await one<{ rendered_body: string }>(
+    `SELECT rendered_body FROM outreach_task WHERE channel='inpock_offer' ORDER BY id DESC LIMIT 1`);
+  if (task) {
+    assert.match(task.rendered_body, /제안 유형/, "인포크 문안이어야 한다");
+    assert.doesNotMatch(task.rendered_body, /안녕하세요.*입니다\./, "이메일 인사말이 들어가면 안 된다");
+  }
 });

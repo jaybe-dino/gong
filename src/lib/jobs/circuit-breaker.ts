@@ -18,10 +18,13 @@ export interface BreakerTick {
 export async function tick(): Promise<BreakerTick> {
   const stats = await one<{ sent: string; delivered: string; complaints: string; bounces: string }>(
     `SELECT
-        count(*) FILTER (WHERE m.direction='out' AND m.channel='email') AS sent,
-        count(*) FILTER (WHERE e.type='delivered')                      AS delivered,
-        count(*) FILTER (WHERE e.type='complaint')                      AS complaints,
-        count(*) FILTER (WHERE e.type IN ('bounce_hard','bounce_soft')) AS bounces
+        -- dry-run 은 실제 발송이 아니다. 분모에 넣으면 스팸률·바운스율이 희석돼
+        -- 브레이커가 늦게 걸린다 — 계정을 지키라고 만든 장치가 반대로 는다.
+        count(*) FILTER (WHERE m.direction='out' AND m.channel='email' AND m.status <> 'dry_run') AS sent,
+        count(*) FILTER (WHERE e.type='delivered' AND m.status <> 'dry_run')  AS delivered,
+        count(*) FILTER (WHERE e.type='complaint' AND m.status <> 'dry_run')  AS complaints,
+        count(*) FILTER (WHERE e.type IN ('bounce_hard','bounce_soft')
+                           AND m.status <> 'dry_run')                         AS bounces
        FROM message m LEFT JOIN message_event e ON e.message_id = m.id
       WHERE m.sent_at >= now() - ($1 || ' days')::interval`,
     [String(WINDOW_DAYS)],

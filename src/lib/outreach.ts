@@ -72,9 +72,12 @@ export async function loadGateInputs() {
     all<ChannelPolicy>(`SELECT * FROM channel_policy`),
     all<SuppressionRow>(`SELECT identifier_type, identifier_val, channels, reason, expires_at FROM suppression`),
     all<{ metric: string; is_tripped: boolean; action: string }>(`SELECT metric, is_tripped, action FROM circuit_breaker`),
-    one<{ id: string; subject: string | null; body: string; is_ad_content: boolean }>(
-      `SELECT id, subject, body, is_ad_content FROM template
-        WHERE channel='email' AND is_ad_content ORDER BY name LIMIT 1`),
+    // 채널별로 하나씩. 예전에는 이메일 템플릿 하나만 들고 와서 인포크·인링크
+    // 작업 큐에도 이메일 문구가 그대로 들어갔다 — 인포크 전용 템플릿이 DB 에
+    // 있는데도 안 쓰였다.
+    all<{ channel: string; id: string; subject: string | null; body: string; is_ad_content: boolean }>(
+      `SELECT DISTINCT ON (channel) channel, id, subject, body, is_ad_content
+         FROM template ORDER BY channel, is_ad_content DESC, name`),
     one<SenderInfo>(
       `SELECT id, identifier, sent_today, current_cap, display_name,
               to_char(paused_until,'YYYY-MM-DD HH24:MI') AS paused_until
@@ -124,6 +127,10 @@ export function evaluateCandidate(
   const channel = isEmail ? "email" : (cand.contact_channel ?? "instagram_dm");
   const policy = policies.find((p) => p.channel === channel) ?? policies.find((p) => p.channel === "instagram_dm")!;
 
+  // 그 채널의 템플릿을 쓴다. 없으면 이메일 것으로 떨어뜨리되, 인포크 폼에 이메일
+  // 인사말이 그대로 들어가는 일은 없어야 하므로 경고를 남긴다.
+  const t = tpl.find((x) => x.channel === channel) ?? tpl.find((x) => x.channel === "email") ?? null;
+
   // 수신거부 URL 은 reply_token 을 쓴다. member_id 를 노출하면 내부 식별자가 메일에 실린다.
   const token = cand.reply_token?.replace(/^cm_/, "") ?? cand.member_id;
   const unsubUrl = `${MAIL.unsubBase}/${token}`;
@@ -132,7 +139,7 @@ export function evaluateCandidate(
   let renderError: string | null = null;
   try {
     rendered = render(
-      { subject: tpl?.subject ?? null, body: tpl?.body ?? "제안 드립니다.", is_ad_content: tpl?.is_ad_content ?? true },
+      { subject: t?.subject ?? null, body: t?.body ?? "제안 드립니다.", is_ad_content: t?.is_ad_content ?? true },
       buildVars(cand, campaign, sender?.display_name ?? "Dinostudio"),
       policy,
       { ...MAIL, unsubUrl, unsubMailto: `${local}+unsub_${token}@${domain}`, displayName: sender?.display_name ?? "Dinostudio" },
@@ -152,7 +159,7 @@ export function evaluateCandidate(
     suppressions: sups,
     sender: isEmail && sender ? sender : null,
     lastContactAt: cand.last_contact_at,
-    template: { is_ad_content: tpl?.is_ad_content ?? true },
+    template: { is_ad_content: t?.is_ad_content ?? true },
     rendered: rendered ?? { subject: null, body: "", headers: {} },
     now,
     breakers: brs,
