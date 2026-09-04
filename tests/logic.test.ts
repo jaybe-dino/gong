@@ -611,3 +611,31 @@ test("DNS 점검 — 조회 실패를 '없음' 으로 보고하지 않는다", a
   // 상태가 unknown 이면 ok 로 올라가지 않는다 — 모르는 것을 됐다고 하면 안 된다.
   assert.equal(r.checks.some((c) => c.status === "ok"), false);
 });
+
+test("조사는 받침을 보고 고른다", async () => {
+  // 회귀: 설정 저장 실패 문구가 "사업장 주소은 비울 수 없습니다" 로 나갔다.
+  // 화면에 그대로 보이는 말이라 조립할 때 받침을 봐야 한다.
+  const { josa, hasCoda } = await import("../src/lib/format.ts");
+
+  assert.equal(josa("사업장 주소", "은는"), "사업장 주소는");
+  assert.equal(josa("연락처", "은는"), "연락처는");
+  assert.equal(josa("발송 도메인", "은는"), "발송 도메인은");
+  assert.equal(josa("발송 도메인", "을를"), "발송 도메인을");
+  assert.equal(josa("캠페인", "이가"), "캠페인이");
+  // 와/과 는 순서가 뒤집혀 있다 — 받침이 있으면 '과'. 쌍은 항상 받침 있는 쪽을 먼저 쓴다.
+  assert.equal(josa("메일함", "과와"), "메일함과");
+  assert.equal(josa("메일함", "은는"), "메일함은");
+  assert.equal(josa("주소", "과와"), "주소와");
+
+  // 라틴 문자는 한글로 읽은 소리로 판정한다 — m 은 "엠"(받침 있음), o 는 "오".
+  assert.equal(hasCoda("main@diboutique.com"), true);
+  assert.equal(hasCoda("hello@dino.co"), false);
+  assert.equal(hasCoda("gmail"), true);
+
+  // 괄호·마침표로 끝나면 그 앞 글자를 본다.
+  assert.equal(josa("슬랙 웹훅 (선택)", "은는"), "슬랙 웹훅 (선택)은");
+
+  // 숫자: 1(일)·3(삼)·6(육) 은 받침이 있고 2(이)·5(오) 는 없다.
+  assert.equal(hasCoda("13"), true);
+  assert.equal(hasCoda("12"), false);
+});

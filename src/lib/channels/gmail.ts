@@ -1,4 +1,6 @@
 import crypto from "node:crypto";
+import { run } from "../db";
+import { defaultMailbox, isConfigured as saConfigured, listMessages, mailboxes, sendRaw } from "../google-sa";
 
 /**
  * Gmail 어댑터 — 회사 메일 한 개로 발송·회신을 모두 처리한다.
@@ -10,40 +12,16 @@ import crypto from "node:crypto";
  *   partner+cm_{token}@dinostudio.kr
  * 회신이 오면 To/Delivered-To 헤더에서 토큰을 뽑아 어느 campaign_member 인지 즉시 안다.
  *
- * GOOGLE_* 환경변수가 없으면 dry-run 으로 동작한다 — 콘솔에 찍히고 실제로 나가지 않는다.
+ * 인증은 서비스 계정 + 도메인 전체 위임이다 (google-sa.ts). 사용자 동의 화면도,
+ * 저장해 둘 리프레시 토큰도 없다. 키가 없으면 dry-run 으로 동작한다 —
+ * 콘솔에 찍히고 실제로 나가지 않는다.
+ *
+ * googleapis SDK 를 쓰지 않는다. JWT 서명 + REST 두 단계뿐이라 의존성을 늘릴
+ * 이유가 없고, 선택 의존성이 없을 때 조용히 dry-run 으로 떨어지던 경로도 사라진다.
  */
 
-export const SCOPES = [
-  "https://www.googleapis.com/auth/gmail.send",
-  "https://www.googleapis.com/auth/gmail.readonly",
-  "https://www.googleapis.com/auth/gmail.modify",
-];
-
 export function isConfigured(): boolean {
-  return Boolean(
-    process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET && process.env.GOOGLE_REFRESH_TOKEN,
-  );
-}
-
-/** googleapis 는 선택 의존성이다. 없으면 dry-run 으로 떨어진다. */
-async function client(): Promise<unknown | null> {
-  try {
-    const mod = (await import(/* webpackIgnore: true */ "googleapis")) as unknown as {
-      google: {
-        auth: { OAuth2: new (a?: string, b?: string, c?: string) => { setCredentials(c: object): void } };
-        gmail(o: object): unknown;
-      };
-    };
-    const auth = new mod.google.auth.OAuth2(
-      process.env.GOOGLE_CLIENT_ID,
-      process.env.GOOGLE_CLIENT_SECRET,
-      process.env.GOOGLE_REDIRECT_URI ?? "http://localhost:3000/oauth/callback",
-    );
-    auth.setCredentials({ refresh_token: process.env.GOOGLE_REFRESH_TOKEN });
-    return mod.google.gmail({ version: "v1", auth });
-  } catch {
-    return null;
-  }
+  return saConfigured();
 }
 
 /** 저장된 토큰이 이미 cm_ 접두사를 갖고 있을 수 있다. 어느 쪽이 와도 한 번만 붙인다. */
@@ -107,9 +85,10 @@ export interface SendResult {
 
 export async function send(msg: OutboundMessage): Promise<SendResult> {
   const raw = buildRaw(msg);
-  const gmail = isConfigured() ? await client() : null;
+  // 등록된 기본 발신함이 없으면 보낼 곳이 정해지지 않은 것이다 — dry-run 으로 둔다.
+  const from = isConfigured() ? await defaultMailbox() : null;
 
-  if (!gmail) {
+  if (!from) {
     console.log(
       `[gmail:dry-run] → ${msg.to}\n  Reply-To: ${msg.replyTo}\n  Subject: ${msg.subject}\n` +
         msg.body.split("\n").map((l) => "  | " + l).join("\n"),
@@ -121,14 +100,8 @@ export async function send(msg: OutboundMessage): Promise<SendResult> {
     };
   }
 
-  const api = gmail as {
-    users: { messages: { send(o: object): Promise<{ data: { id: string; threadId: string } }> } };
-  };
-  const res = await api.users.messages.send({
-    userId: "me",
-    requestBody: { raw, ...(msg.threadKey ? { threadId: msg.threadKey } : {}) },
-  });
-  return { providerMessageId: res.data.id, threadKey: res.data.threadId, dryRun: false };
+  const res = await sendRaw(from, raw);
+  return { providerMessageId: res.id, threadKey: res.threadId, dryRun: false };
 }
 
 export interface InboundMessage {
@@ -182,43 +155,44 @@ export function normalizeInbound(m: {
   };
 }
 
-/** 수신 동기화. history API 로 증분만 가져온다. 미설정이면 빈 배열. */
+/**
+ * 수신 동기화 — 등록·활성화된 메일함을 순회해 최근 메일을 가져온다.
+ *
+ * history API 의 증분 경로를 쓰지 않는다. 그쪽은 startHistoryId 가 만료되면
+ * 조용히 구멍이 나고, 읽음 표시(gmail.modify)로 커서를 대신할 수도 없다 —
+ * 스코프를 readonly + compose 로 묶어 뒀기 때문이다. 대신 최근 구간을 통째로
+ * 다시 읽고 provider_msg_id 로 중복을 막는다 (inbound-sync.ingest). 겹쳐 읽는
+ * 비용보다 놓치지 않는 쪽이 싸다.
+ */
 export async function fetchInbound(
-  { sinceHistoryId, maxResults = 50 }: { sinceHistoryId?: string | null; maxResults?: number } = {},
-): Promise<{ messages: InboundMessage[]; historyId: string | null; dryRun: boolean }> {
-  const gmail = isConfigured() ? await client() : null;
-  if (!gmail) return { messages: [], historyId: sinceHistoryId ?? null, dryRun: true };
+  { query, maxResults = 50 }: { query?: string; maxResults?: number } = {},
+): Promise<{ messages: InboundMessage[]; dryRun: boolean }> {
+  if (!isConfigured()) return { messages: [], dryRun: true };
 
-  const api = gmail as {
-    users: {
-      history: { list(o: object): Promise<{ data: { historyId?: string; history?: { messagesAdded?: { message: { id: string } }[] }[] } }> };
-      messages: {
-        list(o: object): Promise<{ data: { messages?: { id: string }[] } }>;
-        get(o: object): Promise<{ data: Parameters<typeof normalizeInbound>[0] }>;
-      };
-      getProfile(o: object): Promise<{ data: { historyId: string } }>;
-    };
-  };
+  const boxes = (await mailboxes()).filter((m) => m.enabled);
+  if (boxes.length === 0) return { messages: [], dryRun: true };
 
-  let ids: string[] = [];
-  let historyId = sinceHistoryId ?? null;
-
-  if (sinceHistoryId) {
-    const h = await api.users.history.list({ userId: "me", startHistoryId: sinceHistoryId, historyTypes: ["messageAdded"] });
-    historyId = h.data.historyId ?? sinceHistoryId;
-    for (const rec of h.data.history ?? []) {
-      for (const m of rec.messagesAdded ?? []) ids.push(m.message.id);
-    }
-  } else {
-    const l = await api.users.messages.list({ userId: "me", q: "in:inbox newer_than:7d", maxResults });
-    ids = (l.data.messages ?? []).map((m) => m.id);
-    historyId = (await api.users.getProfile({ userId: "me" })).data.historyId;
-  }
-
+  const q = query ?? "in:inbox newer_than:7d -in:spam -in:trash";
   const out: InboundMessage[] = [];
-  for (const id of [...new Set(ids)]) {
-    const full = await api.users.messages.get({ userId: "me", id, format: "full" });
-    out.push(normalizeInbound(full.data));
+  for (const box of boxes) {
+    // 한 메일함이 실패해도 나머지는 계속 돈다. 원인은 그 메일함에 기록해 둔다.
+    try {
+      const raw = await listMessages(box.email, { query: q, limit: maxResults });
+      for (const m of raw) out.push(normalizeInbound(m as Parameters<typeof normalizeInbound>[0]));
+      await markSynced(box.email, null);
+    } catch (e) {
+      const detail = (e as Error).message;
+      console.error("[gmail:inbound]", box.email, detail);
+      await markSynced(box.email, detail);
+    }
   }
-  return { messages: out, historyId, dryRun: false };
+  return { messages: out, dryRun: false };
+}
+
+async function markSynced(email: string, error: string | null): Promise<void> {
+  await run(
+    `UPDATE mailbox SET last_sync_at = CASE WHEN $2::text IS NULL THEN now() ELSE last_sync_at END,
+            last_error = $2 WHERE email = $1`,
+    [email, error],
+  ).catch(() => {});
 }

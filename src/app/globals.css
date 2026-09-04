@@ -372,3 +372,12 @@ ul.tight li{margin-bottom:5px}
 .login-card .bad{margin:0;font-size:12.5px;color:var(--stop)}
 .login-card .hint{margin:0;font-size:12px;color:var(--ink-2);line-height:1.7}
 .login-card code{font-family:"IBM Plex Mono",monospace;font-size:11.5px;background:var(--surface-3);padding:1px 5px;border-radius:2px}
+
+/* 설정 화면 — 폼 입력이 카드 안에 들어가는 유일한 화면이라 여기서만 쓰는 규칙이다. */
+.settings .field{display:grid;gap:4px}
+.settings .field>span{font-size:11.5px;color:var(--ink-2)}
+.settings input:not([type=hidden]){font:inherit;font-size:12.5px;padding:6px 9px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--ink);min-width:0}
+.settings input:focus{outline:2px solid var(--accent-line);outline-offset:1px;border-color:var(--accent)}
+.settings .cols{gap:12px}
+.settings td form{display:inline}
+.settings .note pre{margin:0}

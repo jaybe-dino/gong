@@ -16,8 +16,6 @@ import { parseReturnDate } from "../parse";
  * 답장으로 세면 회신율이 부풀고 살아 있는 대상이 조용히 죽는다.
  */
 
-let historyId: string | null = null;
-
 export interface SyncResult {
   processed: number;
   skipped: number;
@@ -26,8 +24,7 @@ export interface SyncResult {
 }
 
 export async function tick(): Promise<SyncResult> {
-  const { messages, historyId: newId, dryRun } = await gmail.fetchInbound({ sinceHistoryId: historyId });
-  historyId = newId ?? historyId;
+  const { messages, dryRun } = await gmail.fetchInbound();
   if (dryRun) return { processed: 0, skipped: 0, unmapped: 0, dryRun: true };
 
   let processed = 0;

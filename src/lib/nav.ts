@@ -32,6 +32,9 @@ export async function navGroups(): Promise<NavGroup[]> {
       { href: "/queue", label: "작업 큐", count: tasks },
     ] },
     { title: "커뮤니케이션", items: [{ href: "/inbox", label: "통합 인박스", count: threads }] },
-    { title: "설정", items: [{ href: "/policy", label: "채널 정책 · 발신 계정" }] },
+    { title: "설정", items: [
+      { href: "/settings", label: "계정 연동 · 설정" },
+      { href: "/policy", label: "채널 정책 · 발신 계정" },
+    ] },
   ];
 }

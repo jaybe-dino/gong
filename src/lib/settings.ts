@@ -1,4 +1,5 @@
 import { all, one, run } from "./db";
+import { josa } from "./format";
 
 /**
  * 앱 설정.
@@ -48,16 +49,8 @@ export const SPECS: SettingSpec[] = [
   },
   {
     key: "app.base_url", label: "앱 주소", env: "APP_BASE_URL", fallback: "https://gong-three.vercel.app",
-    hint: "수신거부 링크와 OAuth 콜백에 씁니다. 발신 도메인과 같으면 도달률에 유리합니다.",
+    hint: "수신거부 링크에 씁니다. 발신 도메인과 같으면 도달률에 유리합니다.",
     required: true, pattern: /^https?:\/\/[^\s/]+$/, patternHint: "https://호스트 (끝에 / 없이)",
-  },
-  {
-    key: "google.client_id", label: "Google 클라이언트 ID", env: "GOOGLE_CLIENT_ID", fallback: "",
-    hint: "Google Cloud Console → 사용자 인증 정보 → OAuth 클라이언트 ID (웹 애플리케이션).",
-  },
-  {
-    key: "google.client_secret", label: "Google 클라이언트 시크릿", env: "GOOGLE_CLIENT_SECRET", fallback: "",
-    hint: "위와 같은 화면에서 발급됩니다. 저장 후에는 화면에 다시 보이지 않습니다.",
   },
   {
     key: "slack.webhook", label: "슬랙 웹훅 (선택)", env: "SLACK_WEBHOOK_URL", fallback: "",
@@ -65,8 +58,14 @@ export const SPECS: SettingSpec[] = [
   },
 ];
 
-/** 화면에 값을 되돌려주지 않는 키. 시크릿은 저장 후 확인만 된다. */
-export const SECRET_KEYS = new Set(["google.client_secret"]);
+/**
+ * 화면에 값을 되돌려주지 않는 키. 시크릿은 저장 후 확인만 된다.
+ *
+ * Google 자격증명은 여기에 없다. 서비스 계정 키는 DB 가 아니라 환경변수
+ * (GOOGLE_SA_KEY_JSON) 로만 들어온다 — 도메인 전 계정을 열 수 있는 값이라
+ * 화면에서 입력·조회할 수 있으면 안 된다.
+ */
+export const SECRET_KEYS = new Set<string>();
 
 const SPEC_BY_KEY = new Map(SPECS.map((s) => [s.key, s]));
 
@@ -127,7 +126,7 @@ export async function save(
     if (!v) {
       // 빈 값은 삭제로 본다. 필수 항목은 환경 변수·기본값이 있어야 지울 수 있다.
       if (spec.required && !process.env[spec.env] && !spec.fallback) {
-        errors.push({ key, message: `${spec.label}은 비울 수 없습니다.` });
+        errors.push({ key, message: `${josa(spec.label, "은는")} 비울 수 없습니다.` });
         continue;
       }
       clean.push([key, ""]);

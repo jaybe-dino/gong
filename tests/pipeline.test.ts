@@ -934,3 +934,48 @@ test("채널마다 그 채널의 템플릿을 쓴다", async () => {
     assert.doesNotMatch(task.rendered_body, /안녕하세요.*입니다\./, "이메일 인사말이 들어가면 안 된다");
   }
 });
+
+// ---------- Google 서비스 계정 연동 ----------
+
+test("등록된 메일함 밖은 대신할 수 없다", async () => {
+  // 서비스 계정 키는 도메인 마스터키다. sub 에 임의 주소를 넣으면 그 계정이
+  // 되므로, impersonate 대상은 반드시 이 표 안으로 제한돼야 한다.
+  const sa = await import("../src/lib/google-sa.ts");
+  await run(`DELETE FROM mailbox`);
+
+  await assert.rejects(
+    () => sa.assertMailbox("ceo@diboutique.com"),
+    /등록된 메일함이 아닙니다/,
+    "등록되지 않은 주소를 통과시키면 안 된다",
+  );
+
+  // 발송 도메인 밖의 주소는 애초에 등록되지 않는다 — 위임이 통하지 않는 주소다.
+  const outside = await sa.addMailbox("someone@gmail.com", null, "diboutique.com");
+  assert.equal(outside.ok, false);
+  assert.equal(await n("mailbox"), 0);
+
+  const ok = await sa.addMailbox("main@diboutique.com", "대표 메일함", "diboutique.com");
+  assert.equal(ok.ok, true, JSON.stringify(ok));
+  assert.equal(await sa.assertMailbox("MAIN@Diboutique.com"), "main@diboutique.com", "대소문자는 같은 주소다");
+
+  // 첫 메일함은 기본 발신함이 된다 — 하나뿐인데 고르라고 물을 이유가 없다.
+  assert.equal(await sa.defaultMailbox(), "main@diboutique.com");
+});
+
+test("기본 발신함은 언제나 하나다", async () => {
+  const sa = await import("../src/lib/google-sa.ts");
+  await run(`DELETE FROM mailbox`);
+  for (const e of ["main@diboutique.com", "hello@diboutique.com", "team@diboutique.com"]) {
+    assert.equal((await sa.addMailbox(e, null, "diboutique.com")).ok, true);
+  }
+
+  await sa.setDefaultMailbox("team@diboutique.com");
+  const boxes = await sa.mailboxes();
+  assert.equal(boxes.filter((b) => b.is_default).length, 1, "부분 유니크 인덱스가 둘을 허용하면 안 된다");
+  assert.equal(await sa.defaultMailbox(), "team@diboutique.com");
+
+  // 기본 발신함을 꺼 두면 보낼 곳이 없다 — dry-run 으로 떨어져야지, 임의의 다른
+  // 메일함으로 새어 나가면 안 된다.
+  await sa.setEnabled("team@diboutique.com", false);
+  assert.equal(await sa.defaultMailbox(), null);
+});

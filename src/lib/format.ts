@@ -51,3 +51,37 @@ export const SOURCE_TYPE_LABEL: Record<string, string> = {
   bio_public: "공개 bio", link_page_public: "공개 링크페이지", inbound_apply: "인바운드 신청",
   business_card: "명함", referral: "소개",
 };
+
+/**
+ * 조사 선택. 앞말의 받침 유무로 은/는 · 을/를 · 이/가 를 고른다.
+ *
+ * 문구를 조립하면 "사업장 주소은 비울 수 없습니다" 같은 문장이 나온다. 화면에
+ * 그대로 나가는 말이라 이 정도는 맞춰 준다.
+ *
+ * 이메일·도메인처럼 라틴 문자로 끝나는 말은 마지막 글자를 읽은 소리로 판정한다
+ * (m → "엠", 받침 있음).
+ */
+/** 라틴 문자 중 한글로 읽었을 때 받침이 남는 것 — 엘·엠·엔·알. */
+const LATIN_CODA = new Set(["l", "m", "n", "r"]);
+/** 숫자 중 받침이 있는 것 — 영·일·삼·육·칠·팔. */
+const DIGIT_CODA = new Set(["0", "1", "3", "6", "7", "8"]);
+
+export function hasCoda(word: string): boolean {
+  const ch = word.trim().replace(/[)\]}>"'\s.]+$/, "").slice(-1).toLowerCase();
+  if (!ch) return false;
+  const code = ch.charCodeAt(0);
+  // 한글 음절: (코드 - 0xAC00) % 28 이 0 이 아니면 받침이 있다.
+  if (code >= 0xac00 && code <= 0xd7a3) return (code - 0xac00) % 28 !== 0;
+  if (DIGIT_CODA.has(ch)) return true;
+  return LATIN_CODA.has(ch);
+}
+
+/**
+ * 쌍은 언제나 "받침 있을 때 · 없을 때" 순서로 쓴다.
+ *
+ * 와/과 는 다른 조사와 순서가 뒤집혀 있다 (받침이 있으면 '과'). 호출부마다
+ * 기억하게 두면 한 번은 틀린다 — 순서를 규칙으로 못 박고 이름도 그렇게 쓴다.
+ */
+export function josa(word: string, pair: "은는" | "을를" | "이가" | "과와"): string {
+  return word + (hasCoda(word) ? pair[0] : pair[1]);
+}
