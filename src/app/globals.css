@@ -337,8 +337,8 @@ ul.tight li{margin-bottom:5px}
 .setup .step:first-of-type{border-top:0;padding-top:4px}
 .setup .field{display:grid;gap:5px;max-width:420px}
 .setup .field>span{font-size:11px;color:var(--ink-3);font-family:"IBM Plex Mono",monospace;letter-spacing:.06em}
-.setup input[type=password]{font-family:"IBM Plex Mono",monospace;font-size:13px;padding:8px 11px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--ink)}
-.setup input[type=password]:focus{outline:2px solid var(--accent-line);outline-offset:1px;border-color:var(--accent)}
+.setup input[type=password],.setup input[type=text],.setup .field input:not([type]){font-family:"IBM Plex Mono",monospace;font-size:13px;padding:8px 11px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--ink)}
+.setup input[type=password]:focus,.setup .field input:focus{outline:2px solid var(--accent-line);outline-offset:1px;border-color:var(--accent)}
 .setup button{justify-self:start;font:inherit;font-size:13px;font-weight:500;padding:8px 18px;border:1px solid var(--accent);border-radius:var(--r);background:var(--accent);color:#fff;cursor:pointer}
 .setup button:hover:not(:disabled){background:var(--accent-ink)}
 .setup button:disabled{background:var(--surface-3);border-color:var(--line-2);color:var(--ink-3);cursor:not-allowed}
@@ -381,3 +381,8 @@ ul.tight li{margin-bottom:5px}
 .settings .cols{gap:12px}
 .settings td form{display:inline}
 .settings .note pre{margin:0}
+
+/* 되돌릴 수 없는 동작은 색으로 구분한다 — 실수로 누르는 자리가 아니다. */
+.setup .card.danger{border-color:var(--stop);background:var(--stop-soft)}
+.setup .card.danger button{background:var(--stop);border-color:var(--stop)}
+.setup .card.danger button:hover:not(:disabled){filter:brightness(1.08)}

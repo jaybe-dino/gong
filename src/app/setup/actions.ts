@@ -52,3 +52,28 @@ export async function seedAction(form: FormData) {
   }
   back("ok", msg);
 }
+
+/**
+ * 전부 지우고 처음부터.
+ *
+ * 데모 시드를 걷어내고 실데이터를 올리려면 한 번은 비워야 한다. API 라우트에
+ * drop=1 이 있지만 그건 curl 로만 부를 수 있다 — 터미널 없이 브라우저에서
+ * 끝내야 하므로 화면에도 낸다.
+ *
+ * 되돌릴 수 없는 동작이라 시크릿만으로는 부족하다. 확인 문구를 정확히 입력하게
+ * 한다 — 실수로 눌러서 19,000행이 날아가는 일은 한 번도 있으면 안 된다.
+ */
+export async function resetAction(form: FormData) {
+  checkSecret(form);
+  if (String(form.get("confirm") ?? "").trim() !== "전부 지운다") {
+    back("err", '확인 문구가 다릅니다. "전부 지운다" 를 그대로 입력해야 실행됩니다.');
+  }
+  let msg: string;
+  try {
+    const r = await setupDb({ drop: true });
+    msg = `전부 지우고 스키마를 새로 적용했습니다. 테이블 ${num(r.tables)}개. 이제 /import 에서 실데이터를 올리세요.`;
+  } catch (e) {
+    back("err", `초기화 실패: ${(e as Error).message}`);
+  }
+  back("ok", msg);
+}

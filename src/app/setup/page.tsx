@@ -1,6 +1,6 @@
 import { scalar } from "@/lib/db";
 import { schemaState } from "@/lib/schema";
-import { setupAction, seedAction } from "./actions";
+import { setupAction, seedAction, resetAction } from "./actions";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -135,6 +135,28 @@ export default async function SetupPage({
             <input type="checkbox" name="force" value="1" />
             <span>이미 있어도 지우고 다시 넣기</span>
           </label>
+        </form>
+      </section>
+
+      <section className="card danger">
+        <h2>전부 지우고 처음부터</h2>
+        <p className="hint">
+          데모 데이터를 걷어내고 <b>실데이터</b>를 올릴 때 씁니다. 크리에이터·연락처·발송 기록까지
+          <b> 전부 사라지고 되돌릴 수 없습니다</b>. 지운 뒤에는 <a href="/import">데이터 임포트</a> 에서
+          CSV 를 올리세요.
+        </p>
+        <form action={resetAction} className="step">
+          <label className="field">
+            <span>CRON_SECRET</span>
+            <input type="password" name="secret" required autoComplete="off" />
+          </label>
+          <label className="field">
+            <span>확인 문구 — 전부 지운다</span>
+            <input name="confirm" required autoComplete="off" placeholder="전부 지운다" />
+          </label>
+          <button type="submit" disabled={!s.reachable}>
+            전부 지우고 스키마만 새로 적용
+          </button>
         </form>
       </section>
 
