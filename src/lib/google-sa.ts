@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { all, one, run, tx } from "./db";
+import { hasTable } from "./schema";
 
 /**
  * Google 서비스 계정 + 도메인 전체 위임.
@@ -140,6 +141,9 @@ function explain(code: string | undefined, desc: string | undefined, sub: string
  */
 export async function assertMailbox(email: string): Promise<string> {
   const e = email.trim().toLowerCase();
+  if (!(await hasTable("mailbox"))) {
+    throw new Error("메일함 표가 아직 없습니다. 초기 설정에서 마이그레이션을 적용하세요.");
+  }
   const row = await one<{ email: string }>(`SELECT email FROM mailbox WHERE email=$1`, [e]);
   if (!row) throw new Error(`'${e}' 는 등록된 메일함이 아닙니다. 설정에서 먼저 등록하세요.`);
   return row.email;
@@ -154,7 +158,14 @@ export interface Mailbox {
   last_error: string | null;
 }
 
+/**
+ * 008 이 아직 안 올라간 배포에서도 죽지 않는다.
+ *
+ * 메일함이 없으면 보낼 곳이 없는 것이고, 그건 dry-run 이지 예외가 아니다.
+ * 여기서 던지면 발송 화면 전체가 같이 죽는다.
+ */
 export async function mailboxes(): Promise<Mailbox[]> {
+  if (!(await hasTable("mailbox"))) return [];
   return await all<Mailbox>(
     `SELECT email, label, enabled, is_default,
             to_char(last_sync_at,'MM-DD HH24:MI') AS last_sync_at, last_error
@@ -162,6 +173,7 @@ export async function mailboxes(): Promise<Mailbox[]> {
 }
 
 export async function defaultMailbox(): Promise<string | null> {
+  if (!(await hasTable("mailbox"))) return null;
   const r = await one<{ email: string }>(
     `SELECT email FROM mailbox WHERE is_default AND enabled LIMIT 1`);
   return r?.email ?? null;

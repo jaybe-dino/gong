@@ -1,6 +1,6 @@
 import Shell from "@/components/Shell";
 import { Card, Empty, Note, Pill, Scroller } from "@/components/ui";
-import { hasTable } from "@/lib/schema";
+import { hasTable, schemaState } from "@/lib/schema";
 import * as sa from "@/lib/google-sa";
 import * as settings from "@/lib/settings";
 import { checkDomain, type DnsRecordCheck } from "@/lib/jobs/dns-check";
@@ -40,7 +40,7 @@ export default async function SettingsPage({
   searchParams: Promise<{ msg?: string; kind?: string }>;
 }) {
   const { msg, kind } = await searchParams;
-  const ready = await hasTable("mailbox");
+  const [ready, schema] = await Promise.all([hasTable("mailbox"), schemaState()]);
   const id = sa.identity();
 
   const [values, srcs, boxes, tests] = await Promise.all([
@@ -63,10 +63,14 @@ export default async function SettingsPage({
           <Note tone={kind === "err" ? "stop" : undefined}>{msg}</Note>
         )}
 
-        {!ready && (
+        {!schema.ready && (
           <Note tone="stop">
-            <code className="mono">008_mailbox.sql</code> 이 아직 적용되지 않았습니다.{" "}
-            <a href="/setup">초기 설정</a> 에서 마이그레이션을 적용한 뒤 다시 오세요.
+            <b>마이그레이션 {schema.pending.length}개가 아직 적용되지 않았습니다.</b>{" "}
+            <a href="/setup">초기 설정</a> 에서 <b>1. 스키마 적용</b> 을 누르세요. 그때까지 이 화면의
+            메일함 등록·테스트는 동작하지 않고, 발송은 전부 dry-run 입니다.
+            <pre className="mono" style={{ margin: "8px 0 0", fontSize: 11.5, whiteSpace: "pre-wrap" }}>
+              {schema.pending.join("\n")}
+            </pre>
           </Note>
         )}
 

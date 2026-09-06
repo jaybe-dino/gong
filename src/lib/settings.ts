@@ -1,5 +1,6 @@
 import { all, one, run } from "./db";
 import { josa } from "./format";
+import { hasTable } from "./schema";
 
 /**
  * 앱 설정.
@@ -71,8 +72,16 @@ const SPEC_BY_KEY = new Map(SPECS.map((s) => [s.key, s]));
 
 let cache: Map<string, string> | null = null;
 
+/**
+ * 마이그레이션이 밀린 배포에서도 설정은 읽혀야 한다.
+ *
+ * app_setting 은 007 이 만든다. 그 전 상태의 DB 에서 이 함수가 그냥 던지면
+ * /settings 화면 전체가 죽는다 — 정작 그 화면이 "무엇이 빠졌는지" 를 알려주는
+ * 자리인데, 빠졌다는 이유로 열리지 않는다. 없으면 환경 변수·기본값으로 돈다.
+ */
 async function load(): Promise<Map<string, string>> {
   if (cache) return cache;
+  if (!(await hasTable("app_setting"))) return new Map();
   const rows = await all<{ key: string; value: string | null }>(`SELECT key, value FROM app_setting`);
   cache = new Map(rows.filter((r) => r.value != null && r.value !== "").map((r) => [r.key, r.value as string]));
   return cache;
@@ -116,6 +125,9 @@ export async function save(
   values: Record<string, string>,
   userId: string,
 ): Promise<SaveError[]> {
+  if (!(await hasTable("app_setting"))) {
+    return [{ key: "", message: "설정 표가 아직 없습니다. 초기 설정에서 마이그레이션을 적용한 뒤 저장하세요." }];
+  }
   const errors: SaveError[] = [];
   const clean: [string, string][] = [];
 
@@ -171,9 +183,11 @@ export async function oauthRedirect(): Promise<string> {
   return `${(await get("app.base_url")).replace(/\/$/, "")}/api/oauth/google/callback`;
 }
 
+/** 기록이 남지 않아도 테스트 자체는 되어야 한다. 표가 없으면 조용히 넘긴다. */
 export async function testLog(
   kind: string, ok: boolean, detail: unknown, senderId?: string | null, target?: string | null,
 ) {
+  if (!(await hasTable("mail_test"))) return;
   await run(
     `INSERT INTO mail_test (sender_id, kind, target, ok, detail) VALUES ($1,$2,$3,$4,$5)`,
     [senderId ?? null, kind, target ?? null, ok, JSON.stringify(detail ?? {})]);
