@@ -5,6 +5,7 @@ import { all } from "@/lib/db";
 import { addTarget, moveStage } from "@/lib/actions";
 import { defaultCampaign, getCampaign, listCampaigns, loadCreators } from "@/lib/queries";
 import { fmt, fol, STAGE_TONE } from "@/lib/format";
+import CampaignForm from "./CampaignForm";
 import { ENGINE_LABEL } from "@/lib/states";
 
 export const dynamic = "force-dynamic";
@@ -12,7 +13,7 @@ export const dynamic = "force-dynamic";
 export default async function CampaignsPage({
   searchParams,
 }: {
-  searchParams: Promise<{ id?: string; err?: string }>;
+  searchParams: Promise<Record<string, string | undefined>>;
 }) {
   const sp = await searchParams;
   const campaign = sp.id ? await getCampaign(sp.id) : await defaultCampaign();
@@ -61,12 +62,26 @@ export default async function CampaignsPage({
   ]);
   const excluded = excludedPool.filter((r) => r.fit.reason && !r.suppressed).slice(0, 4);
 
+  // 검사에 걸려 되돌아온 입력값 (f_ 접두사).
+  const prefill = Object.fromEntries(
+    Object.entries(sp).filter(([k, v]) => k.startsWith("f_") && v).map(([k, v]) => [k.slice(2), v as string]),
+  );
+
   const totalGmv = members.reduce((a, m) => a + Number(m.gmv), 0);
   const stageMap = Object.fromEntries(stages.map((s) => [s.key, Number(s.n)]));
 
   return (
     <Shell path="/campaigns" title="캠페인" sub={`${campaign?.name ?? "—"} · GMV ${fmt(totalGmv)}원`}>
       <section className="screen">
+        {sp.msg && <Note tone={sp.kind === "err" ? "stop" : undefined}>{sp.msg}</Note>}
+
+        {campaigns.length === 0 && (
+          <Note tone="warn">
+            <b>아직 캠페인이 없습니다.</b> 아래에서 하나 만들어야 대상을 담고 발송할 수 있습니다. 상태를{" "}
+            <b>진행 중</b> 으로 두어야 발송기가 봅니다 — 초안은 건드리지 않습니다.
+          </Note>
+        )}
+
         {sp.err === "reason_required" && (
           <Note tone="stop">
             <b>스테이지를 뒤로 옮기려면 사유가 필요합니다.</b> 자동화는 절대 크리에이터를 뒤로 옮기지 않고,
@@ -79,22 +94,38 @@ export default async function CampaignsPage({
           <Card title="진행 중인 캠페인" hint="행을 클릭하면 그 캠페인 기준으로 화면이 다시 계산됩니다">
             <Scroller wide>
               <table>
-                <thead><tr><th>캠페인</th><th>브랜드</th><th>카테고리</th><th>기간</th><th>타깃</th><th>확정 이상</th><th>GMV</th></tr></thead>
+                <thead><tr><th>캠페인</th><th>브랜드</th><th>카테고리</th><th>상태</th><th>기간</th><th>타깃</th><th>확정 이상</th><th>GMV</th><th /></tr></thead>
                 <tbody>
                   {campaigns.map((c) => (
                     <tr key={c.id} className={`rowlink${c.id === campaign?.id ? " on" : ""}`}>
                       <td><Link href={`/campaigns?id=${c.id}`} scroll={false} style={{ color: "inherit", textDecoration: "none" }}><b>{c.name}</b></Link></td>
                       <td>{c.brand_name}</td>
                       <td>{c.category}</td>
-                      <td className="num">{c.sale_from?.slice(5)} ~ {c.sale_to?.slice(5)}</td>
+                      <td>
+                        {c.status === "running" ? <Pill tone="k-ok">진행 중</Pill>
+                          : c.status === "draft" ? <Pill tone="k-warn">초안</Pill>
+                          : <Pill tone="k-stop">종료</Pill>}
+                      </td>
+                      <td className="num">{c.sale_from?.slice(5) ?? "—"} ~ {c.sale_to?.slice(5) ?? "—"}</td>
                       <td className="num">{fmt(c.members)}</td>
                       <td className="num">{fmt(c.agreed)}</td>
                       <td className="num">{fmt(c.gmv)}</td>
+                      <td>
+                        <Link className="btn sm" href={`/campaigns?id=${c.id}&edit=1`} scroll={false}>수정</Link>
+                      </td>
                     </tr>
                   ))}
+                  {campaigns.length === 0 && (
+                    <tr><td colSpan={9} className="empty">캠페인이 없습니다.</td></tr>
+                  )}
                 </tbody>
               </table>
             </Scroller>
+            <CampaignForm
+              campaign={sp.edit === "1" && campaign ? campaign : null}
+              open={campaigns.length === 0 || sp.edit === "1" || sp.edit === "new"}
+              prefill={prefill}
+            />
           </Card>
 
           <Card title="타깃 추천" hint={`${campaign?.name} · 아직 담지 않은 상위 ${recos.length}명`}>

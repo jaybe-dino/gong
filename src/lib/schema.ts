@@ -19,6 +19,7 @@ export const EXPECTED_MIGRATIONS = [
   "006_dino_dataset.sql",
   "007_app_settings.sql",
   "008_mailbox.sql",
+  "009_campaign_status.sql",
 ];
 
 const tableCache = new Map<string, boolean>();

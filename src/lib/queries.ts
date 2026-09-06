@@ -347,11 +347,11 @@ export async function getCampaign(id: string): Promise<CampaignRow | null> {
 
 export async function listCampaigns() {
   return all<{
-    id: string; name: string; brand_name: string; category: string;
+    id: string; name: string; brand_name: string; category: string; status: string;
     sale_from: string | null; sale_to: string | null;
     members: string; agreed: string; gmv: string;
   }>(
-    `SELECT c.id, c.name, c.brand_name, c.category,
+    `SELECT c.id, c.name, c.brand_name, c.category, c.status,
             to_char(c.sale_from,'YYYY-MM-DD') AS sale_from,
             to_char(c.sale_to,'YYYY-MM-DD') AS sale_to,
             count(m.id) AS members,
