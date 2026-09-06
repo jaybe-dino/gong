@@ -639,3 +639,53 @@ test("조사는 받침을 보고 고른다", async () => {
   assert.equal(hasCoda("13"), true);
   assert.equal(hasCoda("12"), false);
 });
+
+test("카테고리 표기를 표준으로 옮기고, 붙어 있는 것도 뽑아낸다", async () => {
+  // 회귀: category_map 은 씨를 뿌려 두고 아무도 읽지 않았다. 팡팡의 "홈리빙" 이
+  // 그대로 저장돼, 캠페인 카테고리(리빙·인테리어…)와 한 글자도 겹치지 않아
+  // 적합도 20점이 조용히 0 이 됐다.
+  const I = await import("../src/lib/importer.ts");
+  const map: Awaited<ReturnType<typeof I.loadCategoryMap>> = {
+    bySource: new Map([
+      ["dino:뷰티", "뷰티"], ["dino:음식", "식품"], ["dino:살림생활", "리빙"],
+      ["dino:육아", "육아"], ["dino:건강", "건강"], ["dino:다이어트건강", "건강"],
+      ["dino:생활용품", "리빙"], ["dino:생활", "리빙"], ["dino:맛집", "식품"],
+      ["pangpang:홈리빙", "인테리어"],
+    ]),
+    byLabel: new Map([
+      ["뷰티", "뷰티"], ["음식", "식품"], ["살림생활", "리빙"], ["육아", "육아"],
+      ["건강", "건강"], ["다이어트건강", "건강"], ["생활용품", "리빙"], ["생활", "리빙"],
+      ["맛집", "식품"], ["홈리빙", "인테리어"],
+    ]),
+  };
+
+  assert.equal(I.canonicalCategory("홈리빙", "pangpang", map), "인테리어");
+  assert.equal(I.canonicalCategory("음식", "dino", map), "식품");
+  // 매핑에 없는 말은 그대로 둔다 — 없는 표준을 지어내면 안 된다.
+  assert.equal(I.canonicalCategory("기타", "dino", map), "기타");
+  assert.equal(I.canonicalCategory("", "dino", map), null);
+
+  // 붙어 있는 표기: 구분자가 무엇이든 둘 다 뽑고 100% 를 나눠 갖는다.
+  assert.deepEqual(I.deriveShare("뷰티/음식", "dino", map), { 뷰티: 50, 식품: 50 });
+  assert.deepEqual(I.deriveShare("육아+살림생활", "dino", map), { 육아: 50, 리빙: 50 });
+
+  // 요약 문장이 섞여 들어와도 아는 말만 집어낸다.
+  assert.deepEqual(I.deriveShare("뷰티 콘텐츠 5 건 TOP 2 음식", "dino", map), { 뷰티: 50, 식품: 50 });
+
+  // 긴 표기를 먼저 집는다. "다이어트건강" 을 "건강" 으로 자르면 안 되고,
+  // "생활용품" 이 "생활" 로 잘려서도 안 된다.
+  assert.deepEqual(I.deriveShare("다이어트건강", "dino", map), { 건강: 100 });
+  assert.deepEqual(I.deriveShare("생활용품", "dino", map), { 리빙: 100 });
+
+  // 같은 표준으로 모이면 하나로 센다.
+  assert.deepEqual(I.deriveShare("음식/맛집", "dino", map), { 식품: 100 });
+  assert.deepEqual(I.deriveShare("기타", "dino", map), {});
+
+  // 점유율이 이미 있으면 키만 옮기고 비율은 더한다 — 같은 표준으로 모이면 합친다.
+  assert.deepEqual(
+    I.canonicalShare({ "음식": 60, "맛집": 20, "뷰티": 20 }, "dino", map),
+    { 식품: 80, 뷰티: 20 },
+  );
+  // 매핑에 없는 말은 지어내지 않고 그대로 남긴다. 점수에는 반영되지 않는다.
+  assert.deepEqual(I.canonicalShare({ "기타": 100 }, "dino", map), { 기타: 100 });
+});

@@ -219,7 +219,7 @@ export function normalizeRow(raw: Record<string, string>, source: SourceKey) {
     openDate: alwaysOn ? null : openDate,
     closeDate: alwaysOn ? null : closeDate,
     alwaysOn,
-    category: pick(raw, ["카테고리", "category"]),
+    category: pick(raw, ["카테고리", "category", "category_text", "카테고리텍스트"]),
     sourceUrl: pick(raw, ["profile_url", "프로필url", "instagram_profile_url", "url", "detail_url", "source_url"]),
     // 연락처. 이게 없으면 임포트한 크리에이터에게 메일을 한 통도 보낼 수 없다 —
     // 도달 가능성 15점도 통째로 0 이 된다.
@@ -584,6 +584,105 @@ export interface CommitResult {
  * 호출자가 무한히 돈다. 사람이 결정하면 reopenDecided() 가 pending 으로 되돌린다.
  * 오류 행은 저장하지 않는다.
  */
+/**
+ * 소스별 카테고리 표기를 우리 표준으로 옮긴다.
+ *
+ * category_map 은 002 가 씨를 뿌려 두고도 아무도 읽지 않았다. 그래서 팡팡의
+ * "홈리빙" 이 그대로 저장됐고, 적합도의 카테고리 20점은 캠페인 카테고리(리빙·
+ * 인테리어…)와 한 글자도 겹치지 않아 조용히 0 이 됐다. 화면에는 아무 표시도
+ * 나지 않는다 — 순위만 이상해진다.
+ *
+ * 소스가 다른 파일에도 같은 표기가 섞여 들어오므로(디노 통합 DB 는 세 사이트를
+ * 합친 것이다) 소스별 매핑을 먼저 보고, 없으면 표기만으로 찾는다. 두 소스가
+ * 같은 표기를 서로 다른 표준으로 보내면 그건 판단이 갈리는 것이므로 손대지 않는다.
+ */
+export interface CategoryMap {
+  bySource: Map<string, string>;
+  byLabel: Map<string, string | null>;
+}
+
+let catCache: CategoryMap | null = null;
+
+export async function loadCategoryMap(): Promise<CategoryMap> {
+  if (catCache) return catCache;
+  const rows = await all<{ source: string; source_category: string; canonical: string }>(
+    `SELECT source, source_category, canonical FROM category_map`).catch(() => []);
+
+  const bySource = new Map<string, string>();
+  const byLabel = new Map<string, string | null>();
+  for (const r of rows) {
+    const label = r.source_category.trim().toLowerCase();
+    bySource.set(`${r.source}:${label}`, r.canonical);
+    // 이미 다른 표준으로 잡혀 있으면 애매한 표기다 — null 로 막아 둔다.
+    if (byLabel.has(label) && byLabel.get(label) !== r.canonical) byLabel.set(label, null);
+    else if (!byLabel.has(label)) byLabel.set(label, r.canonical);
+  }
+  catCache = { bySource, byLabel };
+  return catCache;
+}
+
+/** 테스트·시드 갱신 후 캐시를 버린다. */
+export function invalidateCategoryMap() {
+  catCache = null;
+}
+
+export function canonicalCategory(
+  raw: string | null | undefined, source: string, map: CategoryMap,
+): string | null {
+  const label = String(raw ?? "").trim().toLowerCase();
+  if (!label) return null;
+  return map.bySource.get(`${source}:${label}`) ?? map.byLabel.get(label) ?? String(raw).trim();
+}
+
+/**
+ * 카테고리 칸에서 표준 카테고리를 뽑아 점유율로 만든다.
+ *
+ * 실제 파일의 이 칸은 한 단어가 아니다 — "뷰티/음식", "육아+살림생활" 처럼
+ * 여러 개가 붙어 있고, "뷰티 콘텐츠 5 건 TOP 2 음식" 같은 요약 문장도 섞여
+ * 들어온다. 통째로 한 라벨로 보면 어느 것도 매핑에 걸리지 않는다.
+ *
+ * 그래서 구분자로 자르지 않고, 아는 표기를 문자열 안에서 찾아낸다. 긴 표기부터
+ * 찾아 지워 가며 본다 — "다이어트건강" 을 "건강" 으로 먼저 집으면 "다이어트" 가
+ * 남고, "생활용품" 이 "생활" 로 잘린다.
+ *
+ * 찾은 것들에 100% 를 균등 배분한다. 실제 비율을 모르는데 아는 척하면 안 되고,
+ * 균등 배분이면 단일 카테고리는 100%(=완전일치 20점), 둘이면 50%씩(=여전히 20점,
+ * 기준이 20% 이므로) 으로 의도한 대로 동작한다.
+ */
+export function deriveShare(
+  raw: string | null | undefined, source: string, map: CategoryMap,
+): Record<string, number> {
+  const text = String(raw ?? "").toLowerCase();
+  if (!text.trim()) return {};
+
+  const labels = [...map.byLabel.keys()].sort((a, b) => b.length - a.length);
+  const found: string[] = [];
+  let rest = text;
+  for (const label of labels) {
+    if (!label || !rest.includes(label)) continue;
+    const canon = canonicalCategory(label, source, map);
+    // byLabel 이 null 이면 소스마다 다른 표준으로 가는 애매한 표기다.
+    if (canon && map.byLabel.get(label) !== null && !found.includes(canon)) found.push(canon);
+    rest = rest.split(label).join(" ");
+  }
+  if (!found.length) return {};
+
+  const each = Math.round((100 / found.length) * 10) / 10;
+  return Object.fromEntries(found.map((c) => [c, each]));
+}
+
+/** 점유율도 같이 옮긴다. 같은 표준으로 모이면 비율을 더한다. */
+export function canonicalShare(
+  share: Record<string, number>, source: string, map: CategoryMap,
+): Record<string, number> {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(share ?? {})) {
+    const key = canonicalCategory(k, source, map) ?? k;
+    out[key] = (out[key] ?? 0) + Number(v || 0);
+  }
+  return out;
+}
+
 export async function commitBatch(
   batchId: string,
   userId: string,
@@ -611,6 +710,7 @@ export async function commitBatch(
     [batchId, limit],
   );
 
+  const catMap = await loadCategoryMap();
   let created = 0, merged = 0, skipped = 0, deferred = 0;
 
   for (const r of pending) {
@@ -631,6 +731,13 @@ export async function commitBatch(
     }
 
     const n = normalizeRow(r.raw, batch.source);
+    n.categoryShare = canonicalShare(n.categoryShare, batch.source, catMap);
+    // 점유율 칸이 따로 없는 파일이 대부분이다. 그럴 때 카테고리 칸에서 만든다 —
+    // 없으면 적합도 20점이 통째로 죽는다.
+    if (!Object.keys(n.categoryShare).length) {
+      n.categoryShare = deriveShare(n.category, batch.source, catMap);
+    }
+    n.category = canonicalCategory(n.category, batch.source, catMap);
     try {
       const { outcome, creatorId } = await applyRow(n, target, userId, batch.source);
       if (outcome === "created") created++;
