@@ -3,6 +3,7 @@ import { notFound } from "next/navigation";
 import Shell from "@/components/Shell";
 import { Card, Empty, IgLink, Note, Pill, Scroller } from "@/components/ui";
 import { fmt, fol } from "@/lib/format";
+import { schemaState } from "@/lib/schema";
 import * as B from "@/lib/blast";
 import * as track from "@/lib/tracking";
 import SendRunner from "./SendRunner";
@@ -50,6 +51,7 @@ export default async function BlastPage({
     ? await Promise.all([track.summary(id), track.linkStats(id), track.engaged(id)])
     : [null, [], []];
 
+  const schema = await schemaState();
   const f = b.filters ?? {};
 
   return (
@@ -64,6 +66,17 @@ export default async function BlastPage({
         </div>
 
         {sp.msg && <Note tone={sp.kind === "err" ? "stop" : undefined}>{sp.msg}</Note>}
+
+        {!schema.ready && (
+          <Note tone="stop">
+            <b>마이그레이션 {schema.pending.length}개가 아직 적용되지 않았습니다.</b>{" "}
+            <a href="/setup">초기 설정</a> 에서 <b>1. 스키마 적용</b> 을 누르세요. 그때까지 HTML 본문 ·
+            열람/클릭 추적 · (광고) 표기 선택이 화면에서 빠집니다.
+            <pre className="mono" style={{ margin: "8px 0 0", fontSize: 11.5, whiteSpace: "pre-wrap" }}>
+              {schema.pending.join("\n")}
+            </pre>
+          </Note>
+        )}
 
         {/* ── 2단계 · 대상 ─────────────────────────────── */}
         {step === 2 && (

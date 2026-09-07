@@ -1,5 +1,6 @@
 import crypto from "node:crypto";
 import { all, one, run } from "./db";
+import { hasColumn, hasTable } from "./schema";
 
 /**
  * 열람·클릭 추적.
@@ -70,6 +71,7 @@ export interface Hit {
  * 구분할 수 있어야 하므로 유니크를 걸지 않는다.
  */
 export async function recordOpen(token: string, ua: string | null): Promise<Hit | null> {
+  if (!(await hasColumn("message", "track_token"))) return null;
   const m = await one<{ id: string }>(`SELECT id FROM message WHERE track_token=$1`, [token]);
   if (!m) return null;
   await run(
@@ -81,6 +83,7 @@ export async function recordOpen(token: string, ua: string | null): Promise<Hit 
 export async function recordClick(
   token: string, idx: number, ua: string | null,
 ): Promise<Hit | null> {
+  if (!(await hasColumn("message", "track_token")) || !(await hasTable("blast_link"))) return null;
   const row = await one<{ id: string; blast_id: string | null }>(
     `SELECT id, blast_id FROM message WHERE track_token=$1`, [token]);
   if (!row?.blast_id) return null;
@@ -111,6 +114,7 @@ export interface TrackSummary {
  */
 export async function summary(blastId: string): Promise<TrackSummary> {
   const zero = { sent: 0, opened: 0, clicked: 0, openEvents: 0, clickEvents: 0 };
+  if (!(await hasColumn("message", "blast_id"))) return zero;
   return (await one<TrackSummary>(
     `SELECT
        (SELECT count(*)::int FROM message WHERE blast_id=$1 AND status='sent') AS sent,
@@ -137,6 +141,7 @@ export async function summary(blastId: string): Promise<TrackSummary> {
  * (실제로 그렇게 나왔다) — 사람 수가 횟수를 넘으면 표를 믿을 수 없다.
  */
 export async function linkStats(blastId: string) {
+  if (!(await hasTable("blast_link"))) return [];
   return all<{ url: string; clicks: number; people: number }>(
     `SELECT l.url,
             count(e.id)::int AS clicks,
@@ -153,6 +158,7 @@ export async function linkStats(blastId: string) {
 
 /** 누가 열었고 눌렀는지. 회신 없이도 관심 있는 대상을 골라낼 수 있다. */
 export async function engaged(blastId: string, limit = 30) {
+  if (!(await hasColumn("message", "blast_id"))) return [];
   return all<{
     handle: string; display_name: string; opens: number; clicks: number;
     first_open: string | null; last_click: string | null;

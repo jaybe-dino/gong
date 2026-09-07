@@ -5,7 +5,7 @@ import { defaultMailbox, isConfigured as isSaConfigured, mailboxes } from "./goo
 import { gmail } from "./channels";
 import { htmlToText } from "./channels/gmail";
 import * as settings from "./settings";
-import { hasTable } from "./schema";
+import { hasColumn, hasTable } from "./schema";
 import * as track from "./tracking";
 import { render, type PolicyRow } from "./template";
 import { channelPolicies } from "./queries";
@@ -251,14 +251,32 @@ export interface Blast {
   sent_at: string | null;
 }
 
+/**
+ * 발송 하나를 읽는다.
+ *
+ * 뒤에 더한 컬럼(012 의 is_ad, 013 의 body_html·추적 플래그)은 있는지 보고
+ * 고른다. 마이그레이션이 밀린 배포에서 그냥 SELECT 하면
+ * `column "body_html" does not exist` 로 화면 전체가 죽는다 — 실제로 죽었다.
+ * 없으면 그 기능만 빠진 기본값으로 돌고, 화면이 무엇이 빠졌는지 알려준다.
+ */
 export async function getBlast(id: string): Promise<Blast | null> {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
-  return (await one<Blast>(
-    `SELECT id, name, channel, campaign_id, mailbox_email, subject, body, body_html,
-            track_opens, track_clicks, filters, is_ad, state,
+
+  const [hasAd, hasHtml] = await Promise.all([
+    hasColumn("blast", "is_ad"),
+    hasColumn("blast", "body_html"),
+  ]);
+
+  const row = await one<Blast>(
+    `SELECT id, name, channel, campaign_id, mailbox_email, subject, body, filters, state,
             target_count, to_char(created_at,'MM-DD HH24:MI') AS created_at,
-            to_char(sent_at,'MM-DD HH24:MI') AS sent_at
-       FROM blast WHERE id=$1`, [id])) ?? null;
+            to_char(sent_at,'MM-DD HH24:MI') AS sent_at,
+            ${hasAd ? "is_ad" : "true AS is_ad"},
+            ${hasHtml
+              ? "body_html, track_opens, track_clicks"
+              : "NULL::text AS body_html, false AS track_opens, false AS track_clicks"}
+       FROM blast WHERE id=$1`, [id]);
+  return row ?? null;
 }
 
 export async function listBlasts(limit = 20) {
@@ -307,10 +325,22 @@ export interface ContentInput {
 export async function saveContent(id: string, c: ContentInput): Promise<void> {
   const html = c.html?.trim() || null;
   const body = c.body.trim() ? c.body : html ? htmlToText(html) : "";
-  await run(
-    `UPDATE blast SET subject=$2, body=$3, body_html=$4, is_ad=$5,
-            track_opens=$6, track_clicks=$7, updated_at=now() WHERE id=$1`,
-    [id, c.subject, body, html, c.isAd, c.trackOpens, c.trackClicks]);
+
+  // 컬럼이 없는 배포에서는 있는 것만 저장한다. 문안 저장이 통째로 실패하는
+  // 것보다, HTML·추적만 빠지고 텍스트는 저장되는 편이 낫다.
+  const [hasAd, hasHtml] = await Promise.all([
+    hasColumn("blast", "is_ad"),
+    hasColumn("blast", "body_html"),
+  ]);
+  const sets = ["subject=$2", "body=$3"];
+  const params: unknown[] = [id, c.subject, body];
+  if (hasAd) { params.push(c.isAd); sets.push(`is_ad=$${params.length}`); }
+  if (hasHtml) {
+    params.push(html); sets.push(`body_html=$${params.length}`);
+    params.push(c.trackOpens); sets.push(`track_opens=$${params.length}`);
+    params.push(c.trackClicks); sets.push(`track_clicks=$${params.length}`);
+  }
+  await run(`UPDATE blast SET ${sets.join(", ")}, updated_at=now() WHERE id=$1`, params);
 }
 
 /** 치환 변수. 문안 화면이 그대로 안내한다. */
@@ -404,6 +434,8 @@ export async function applyTracking(
   b: Blast, r: RenderedBlast, token: string, baseUrl: string, links: string[],
 ): Promise<RenderedBlast> {
   if (!r.html || (!b.track_opens && !b.track_clicks)) return r;
+  // 013 이 없으면 담을 곳이 없다. 추적만 조용히 빠지고 발송은 그대로 나간다.
+  if (!(await hasTable("blast_link"))) return r;
   let html = r.html;
   if (b.track_clicks) html = track.rewriteLinks(html, links, baseUrl, token);
   if (b.track_opens) html += track.pixelTag(baseUrl, token);
@@ -532,8 +564,11 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
   const display = await settings.fromName();
   const baseUrl = (await settings.get("app.base_url")).replace(/\/$/, "");
   // 링크 번호는 발송 전체에서 같아야 한다 — 이미 담아 둔 것을 이어서 쓴다.
-  const links = (await all<{ url: string }>(
-    `SELECT url FROM blast_link WHERE blast_id=$1 ORDER BY idx`, [blastId])).map((x) => x.url);
+  const hasTrackToken = await hasColumn("message", "track_token");
+  const links = (await hasTable("blast_link"))
+    ? (await all<{ url: string }>(
+        `SELECT url FROM blast_link WHERE blast_id=$1 ORDER BY idx`, [blastId])).map((x) => x.url)
+    : [];
 
   let sent = 0, queued = 0, blocked = 0;
   for (const r of rows) {
@@ -570,13 +605,19 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
         replyTo: r.reply_token ? gmail.replyToAddress(base, r.reply_token) : null,
         subject, body, html: rendered.html, headers: rendered.headers,
       });
+      // 컬럼이 없으면 자리표시자도 같이 빠져야 한다. 하나만 빼면
+      // "bind message supplies 10 parameters, but prepared statement requires 9" 로 죽는다.
+      const msgParams: unknown[] = [
+        r.member_id, r.contact_id, b.channel, blastId, res.threadKey, res.providerMessageId,
+        subject, body, res.dryRun ? "dry_run" : "sent",
+      ];
+      if (hasTrackToken) msgParams.push(b.track_opens || b.track_clicks ? trackToken : null);
       await run(
         `INSERT INTO message (campaign_member_id, contact_point_id, channel, direction, blast_id,
-                              thread_key, provider_msg_id, subject, body, status, track_token)
-         VALUES ($1,$2,$3,'out',$4,$5,$6,$7,$8,$9,$10)`,
-        [r.member_id, r.contact_id, b.channel, blastId, res.threadKey, res.providerMessageId,
-         subject, body, res.dryRun ? "dry_run" : "sent",
-         b.track_opens || b.track_clicks ? trackToken : null]);
+                              thread_key, provider_msg_id, subject, body, status
+                              ${hasTrackToken ? ", track_token" : ""})
+         VALUES ($1,$2,$3,'out',$4,$5,$6,$7,$8,$9${hasTrackToken ? ",$10" : ""})`,
+        msgParams);
       await run(
         `UPDATE campaign_member
             SET last_sent_at=now(), first_sent_at=COALESCE(first_sent_at, now()),
