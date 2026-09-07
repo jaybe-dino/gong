@@ -1,4 +1,5 @@
 import Link from "next/link";
+import TaskCard from "./TaskCard";
 import Shell from "@/components/Shell";
 import { Card, Empty, IgLink, Note, Pill, Scroller } from "@/components/ui";
 import { all, one } from "@/lib/db";
@@ -74,37 +75,26 @@ export default async function QueuePage({ searchParams }: { searchParams: Promis
           강제·기록만 담당합니다. 문안은 복사해서 쓰고, 즉흥 작문은 하지 않습니다.
         </Note>
 
-        <Card title="배급된 작업" hint="완료 처리하면 발신 계정 사용량이 올라가고 메시지 기록이 남습니다">
+        <Card title="배급된 작업" hint={`${fmt(tasks.length)}건 · 복사 → 열기 → 보냈음 순서로 처리합니다`}>
           {tasks.length === 0 ? <Empty>대기 중인 작업이 없습니다.</Empty> : (
-            <Scroller wide>
-              <table>
-                <thead><tr><th>대상</th><th>채널</th><th>발신</th><th>문안</th><th>예정</th><th>처리</th></tr></thead>
-                <tbody>
-                  {tasks.map((t) => (
-                    <tr key={t.id}>
-                      <td>
-                        <IgLink handle={t.handle}><b>@{t.handle}</b></IgLink><br />
-                        <span style={{ fontSize: 11, color: "var(--ink-3)" }}>{t.display_name} · {fol(t.followers)} · {t.campaign}</span>
-                      </td>
-                      <td><Pill tone={tone(t.channel)}>{CHANNEL_LABEL[t.channel] ?? t.channel}</Pill></td>
-                      <td className="mono">{t.sender ?? "—"}</td>
-                      <td style={{ maxWidth: 320, fontSize: 11.5, color: "var(--ink-2)", whiteSpace: "pre-wrap" }}>
-                        {t.rendered_body.slice(0, 160)}{t.rendered_body.length > 160 ? "…" : ""}
-                      </td>
-                      <td className="num">{t.due_at}</td>
-                      <td>
-                        <form action={completeTask}>
-                          <input type="hidden" name="id" value={t.id} />
-                          <button className="btn sm" type="submit">
-                            {t.channel === "instagram_dm" ? "복사 후 완료" : "발송 완료"}
-                          </button>
-                        </form>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </Scroller>
+            <div className="card-b tasklist">
+              {tasks.map((t) => (
+                <TaskCard
+                  key={t.id}
+                  id={t.id}
+                  channel={t.channel}
+                  channelLabel={CHANNEL_LABEL[t.channel] ?? t.channel}
+                  handle={t.handle}
+                  displayName={t.display_name}
+                  followers={fol(t.followers)}
+                  campaign={t.campaign}
+                  subject={t.rendered_subject}
+                  body={t.rendered_body}
+                  targetUrl={t.target_url}
+                  dueAt={t.due_at}
+                />
+              ))}
+            </div>
           )}
         </Card>
 

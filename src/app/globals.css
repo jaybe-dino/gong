@@ -433,3 +433,21 @@ ul.tight li{margin-bottom:5px}
 .chcard b{font-size:13.5px;margin-right:6px}
 .chcard p{margin:6px 0 4px;font-size:11.5px;color:var(--ink-2);line-height:1.6}
 .chcard span.mono{font-size:11px;color:var(--ink-3)}
+
+/* 작업 큐 — 한 건씩 붙여넣는 화면. 표가 아니라 카드다. */
+.tasklist{display:grid;gap:14px}
+.taskcard{border:1px solid var(--line-2);border-radius:6px;background:var(--surface);padding:14px 16px;display:grid;gap:10px}
+.tc-h{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:baseline}
+.tc-h .tc-sub{display:block;font-size:11px;color:var(--ink-3);margin-top:2px}
+.tc-meta{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:11px;color:var(--ink-3)}
+.tc-field{display:grid;gap:5px}
+.tc-label{display:flex;align-items:center;gap:8px;font-size:11px;letter-spacing:.06em;color:var(--ink-3);font-family:"IBM Plex Mono",monospace}
+.tc-label .btn{margin-left:auto;cursor:pointer}
+.tc-len{color:var(--ink-3);letter-spacing:0}
+.tc-subject{font-size:13.5px;font-weight:500;padding:7px 10px;background:var(--surface-2);border-radius:var(--r);word-break:break-word}
+.tc-body{margin:0;padding:11px 13px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r);font-family:"IBM Plex Mono",monospace;font-size:12px;line-height:1.8;white-space:pre-wrap;word-break:break-word;max-height:280px;overflow:auto}
+.tc-warn{margin:0;font-size:12px;color:var(--stop)}
+.tc-foot{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding-top:2px}
+.tc-foot .btn{cursor:pointer}
+.tc-foot .tc-hint{font-size:11px;color:var(--ink-3);flex:1;min-width:170px;line-height:1.6}
+.tc-nourl{font-size:11.5px;color:var(--stop)}
