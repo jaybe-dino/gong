@@ -401,9 +401,37 @@ export default async function BlastPage({
               </Card>
             ) : (
               <Card title={ch.auto ? "발송" : "작업 큐에 넣기"}>
+                {pre?.pace ? (
+                  <div className="card-b" style={{ paddingBottom: 0 }}>
+                    <div className="pacebar">
+                      <div>
+                        <span className="pacenum">{pre.pace.remaining.toLocaleString("ko-KR")}</span>
+                        <span className="pacecap">/ {pre.pace.capToday}건</span>
+                        <span className="pacelabel">오늘 남은 발송 여유</span>
+                      </div>
+                      <div className="pacewhy">
+                        {pre.pace.identifier} · {pre.pace.reason}
+                        {pre.pace.sentToday > 0 && ` · 오늘 ${pre.pace.sentToday}건 보냄`}
+                      </div>
+                    </div>
+                    {b.target_count > pre.pace.remaining && (
+                      <p className="subnote" style={{ marginTop: 8 }}>
+                        대상이 여유보다 많습니다. 오늘 {pre.pace.remaining.toLocaleString("ko-KR")}명까지
+                        나가고 멈춥니다 — 내일 같은 버튼을 눌러 이어서 보내세요.
+                        상한을 올리려면 <a href="/settings">설정 → 발신 계정</a> 에서
+                        계정 나이와 하드 실링을 확인하세요.
+                      </p>
+                    )}
+                  </div>
+                ) : null}
                 {pre?.warnings.length ? (
                   <div className="card-b" style={{ paddingBottom: 0 }}>
-                    <Note tone="warn">{pre.warnings.join(" · ")}</Note>
+                    <Note tone="warn">
+                      <b>확인할 것 {pre.warnings.length}가지</b>
+                      <ul style={{ margin: "8px 0 0", paddingLeft: 18, lineHeight: 1.85 }}>
+                        {pre.warnings.map((x) => <li key={x}>{x}</li>)}
+                      </ul>
+                    </Note>
                   </div>
                 ) : null}
                 <SendRunner blastId={id} total={b.target_count} auto={ch.auto} />

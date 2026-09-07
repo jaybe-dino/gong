@@ -1303,3 +1303,85 @@ test("클릭 추적은 우리가 넣은 주소로만 보낸다", async () => {
   assert.equal(s2.openEvents, 2);
   assert.equal(s2.opened, 1, "사람 수와 횟수를 섞으면 열람률이 100%를 넘는다");
 });
+
+// ---------- 발송량 상한 · 워밍업 ----------
+
+test("발송량 상한 — 대상이 많아도 오늘 몫만 나가고 나머지는 남는다", async () => {
+  const B = await import("../src/lib/blast.ts");
+  const P = await import("../src/lib/pacing.ts");
+  const S = await import("../src/lib/settings.ts");
+  await S.save({ "app.base_url": "https://www.diboutique.com", "mail.domain": "diboutique.com",
+                 "mail.postal": "서울시 성동구", "mail.phone": "02-1234-5678" }, JAY);
+
+  // 이 메일함의 발신 계정을 신규(0일)로 만든다 → 워밍업 상한 5건.
+  // 발신 계정을 지우지 않고 초기화한다 — message.sender_id 가 참조하고 있어서
+  // 두 번째 실행에서 외래키에 걸린다.
+  const box = "cap-test@diboutique.com";
+  await run(`INSERT INTO mailbox (email, label) VALUES ($1,'상한 테스트')
+             ON CONFLICT (email) DO NOTHING`, [box]);
+  const s = (await P.ensureSender("email", box, "테스트"))!;
+  await run(
+    `UPDATE sender SET account_age_d=0, warmup_on=true, daily_cap=75,
+                       sent_today=0, sent_date=CURRENT_DATE - 1, paused_until=NULL
+      WHERE id=$1`, [s.id]);
+  // 시간당 상한이 이전 실행의 메시지 때문에 걸리면 이 테스트가 무의미해진다.
+  await run(`UPDATE message SET sent_at = now() - interval '2 hours'
+              WHERE sender_id=$1 AND sent_at > now() - interval '1 hour'`, [s.id]);
+  assert.equal((await P.budget("email", box)).capToday, 5,
+    "신규 계정의 하루 상한은 5건이어야 한다");
+
+  const id = await B.createBlast("상한 점검", "email", JAY);
+  await B.saveFilters(id, { limit: 20 }, box);
+  await B.materialize(id);
+  await B.saveContent(id, {
+    subject: "{{name}} 님께",
+    body: "{{name}}님 안녕하세요. 디노스튜디오에서 공구를 기획하는 담당자입니다. " +
+          "{{handle}} 계정을 보고 결이 맞을 것 같아 연락드렸습니다. 회신 부탁드립니다.",
+    html: null, isAd: true, trackOpens: false, trackClicks: false,
+  });
+
+  const before = (await B.getBlast(id))!.target_count;
+  if (before <= 5) return; // 시드에 대상이 적으면 이 테스트는 의미가 없다
+
+  // 상한(5)보다 큰 청크를 요구해도 5건에서 잘려야 한다.
+  const r = await B.sendChunk(id, 40);
+  assert.equal(r.sent, 5, `상한이 무시됐다 — ${r.sent}건이 나갔다`);
+  assert.ok(!r.done, "남은 대상이 있는데 완료로 표시됐다");
+  assert.ok(r.paced, "상한 때문에 멈췄으면 이유를 돌려줘야 한다");
+
+  // 카운터가 깎였고, 다시 부르면 0건이 나간다 — 화면이 무한히 이어 돌리면 안 된다.
+  const b2 = await P.budget("email", box);
+  assert.equal(b2.sentToday, 5);
+  assert.equal(b2.remaining, 0);
+  const again = await B.sendChunk(id, 40);
+  assert.equal(again.sent, 0, "상한 도달 후에도 발송이 계속됐다");
+  assert.ok(again.paced, "상한 도달을 알려줘야 한다");
+  assert.ok(again.remaining > 0);
+});
+
+test("첫 주 DM 은 아예 못 나간다 — preflight 가 막는다", async () => {
+  const P = await import("../src/lib/pacing.ts");
+  const box = "@cap-test-dm";
+  const s = (await P.ensureSender("instagram_dm", box, "테스트"))!;
+  await run(`UPDATE sender SET account_age_d=2, warmup_on=true, paused_until=NULL WHERE id=$1`, [s.id]);
+
+  const b = await P.budget("instagram_dm", box);
+  assert.equal(b.capToday, 0);
+  assert.match(b.blocked ?? "", /콜드 발송을 시작할 수 없습니다/);
+});
+
+test("워밍업을 끄면 하드 실링만 남는다 — 끄는 것 자체가 눈에 보이는 결정이다", async () => {
+  const P = await import("../src/lib/pacing.ts");
+  const box = "warm-off@diboutique.com";
+  const s = (await P.ensureSender("email", box))!;
+  await run(
+    `UPDATE sender SET account_age_d=0, warmup_on=false, daily_cap=75,
+                       sent_today=0, sent_date=CURRENT_DATE - 1, paused_until=NULL
+      WHERE id=$1`, [s.id]);
+
+  const b = await P.budget("email", box);
+  assert.equal(b.capToday, 75);
+  assert.match(b.reason, /워밍업 해제/);
+  // 시간당 상한은 워밍업과 별개로 계속 걸린다.
+  assert.equal(b.allowedNow, 12);
+});

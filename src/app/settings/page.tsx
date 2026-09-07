@@ -6,8 +6,9 @@ import * as settings from "@/lib/settings";
 import { checkDomain, type DnsRecordCheck } from "@/lib/jobs/dns-check";
 import {
   addMailbox, dnsTest, makeDefault, probeMailbox, receiveTest,
-  removeMailbox, saveSettings, sendTest, toggleMailbox,
+  removeMailbox, savePace, saveSettings, sendTest, toggleMailbox,
 } from "./actions";
+import * as pace from "@/lib/pacing";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -43,11 +44,12 @@ export default async function SettingsPage({
   const [ready, schema] = await Promise.all([hasTable("mailbox"), schemaState()]);
   const id = sa.identity();
 
-  const [values, srcs, boxes, tests] = await Promise.all([
+  const [values, srcs, boxes, tests, pacing] = await Promise.all([
     settings.getAll(),
     settings.sources(),
     ready ? sa.mailboxes() : Promise.resolve([]),
     (await hasTable("mail_test")) ? settings.recentTests(10) : Promise.resolve([]),
+    pace.overview(),
   ]);
   // DNS 는 네트워크를 타므로 설정 값이 정해진 뒤에 본다.
   const dns = values["mail.domain"] ? await checkDomain(values["mail.domain"]) : null;
@@ -225,6 +227,75 @@ export default async function SettingsPage({
             </Scroller>
           </Card>
         </div>
+
+        <Card title="발송량 상한 · 워밍업"
+              hint="하루에 보낼 수 있는 양. 계정 나이에서 계산합니다">
+          <div className="card-b">
+            <p className="lede" style={{ margin: "0 0 12px" }}>
+              하루 상한은 직접 입력하지 않습니다 — <b>계정 나이</b>에서 계산합니다.
+              어제의 두 배를 오늘 보내는 것이 도메인·계정이 스팸으로 찍히는 가장 흔한
+              원인이라, 급할 때 숫자를 올릴 수 있는 칸을 두지 않았습니다.
+            </p>
+            {pacing.length === 0 ? (
+              <Empty>
+                발신 계정이 아직 없습니다. 메일함을 등록하고 한 번 발송하면 여기에 나타납니다.
+              </Empty>
+            ) : (
+              <div className="cols c2">
+                {pacing.map((p) => (
+                  <form key={p.senderId ?? p.identifier} action={savePace} className="pacecard">
+                    <input type="hidden" name="id" value={p.senderId ?? ""} />
+                    <input type="hidden" name="channel" value={p.channel} />
+                    <input type="hidden" name="identifier" value={p.identifier} />
+                    <div className="pacehead">
+                      <b className="mono">{p.identifier}</b>
+                      <Pill tone={p.blocked ? "k-warn" : "k-ok"}>
+                        {p.blocked ? "오늘 대기" : `오늘 ${p.remaining}건 가능`}
+                      </Pill>
+                    </div>
+                    <div className="pacewhy" style={{ marginBottom: 10 }}>
+                      {p.channel === "email" ? "이메일" : p.channel === "instagram_dm" ? "인스타 DM" : p.channel}
+                      {" · "}{p.reason}
+                      {p.sentToday > 0 && ` · 오늘 ${p.sentToday}건 보냄`}
+                    </div>
+                    <div className="cols c2">
+                      <label className="field">
+                        <span>계정 나이 (일)</span>
+                        <input name="age" type="number" min={0} defaultValue={p.ageDays ?? ""} placeholder="예: 14" />
+                        <small style={{ color: "var(--ink-3)", fontSize: 11.5 }}>
+                          비우면 0일로 봅니다 (가장 보수적)
+                        </small>
+                      </label>
+                      <label className="field">
+                        <span>하드 실링 (일)</span>
+                        <input name="cap" type="number" min={1} defaultValue={p.hardCap} />
+                        <small style={{ color: "var(--ink-3)", fontSize: 11.5 }}>
+                          워밍업 값이 이보다 크면 이 값이 이깁니다
+                        </small>
+                      </label>
+                    </div>
+                    <label className="chk" style={{ marginTop: 4 }}>
+                      <input type="checkbox" name="warmup" defaultChecked={p.warmup} />
+                      <span>워밍업 적용 (끄면 하드 실링까지 바로 나갑니다)</span>
+                    </label>
+                    <button className="btn" type="submit" style={{ marginTop: 10 }}>저장</button>
+                  </form>
+                ))}
+              </div>
+            )}
+            <Note tone="warn">
+              <b>수치의 근거</b>
+              <ul style={{ margin: "8px 0 0", paddingLeft: 18, lineHeight: 1.85 }}>
+                <li>이메일 — 신규 메일함 5건/일에서 시작, 7·14·21·30·45·60·90일에 걸쳐 5→50건.
+                  Workspace 공식 한도 2,000건/일은 콜드 발송과 무관합니다.</li>
+                <li>인스타 DM — 첫 주는 0건. 7일 5건 · 14일 20건 · 30일 40건 · 90일 60건 ·
+                  180일 이후 70건.</li>
+                <li>시간당 상한도 함께 걸립니다 (이메일 12건 · DM 10건) — 하루치를 한꺼번에
+                  쏟는 것도 급증입니다.</li>
+              </ul>
+            </Note>
+          </div>
+        </Card>
 
         <Card title="발신 정보" hint="법정 표기가 비면 게이트가 발송을 막습니다">
           <div className="card-b">

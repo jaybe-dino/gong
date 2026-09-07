@@ -8,6 +8,8 @@ import { gmail } from "@/lib/channels";
 import { tick as inboundTick } from "@/lib/jobs/inbound-sync";
 import { checkDomain } from "@/lib/jobs/dns-check";
 import { josa } from "@/lib/format";
+import * as pace from "@/lib/pacing";
+import { run } from "@/lib/db";
 
 /**
  * 설정 화면의 서버 액션.
@@ -131,4 +133,37 @@ export async function dnsTest(): Promise<void> {
   const detail = r.checks.map((c) => `${c.label}: ${c.status}`).join(" · ");
   await settings.testLog("dns", r.ok, { detail }, null, domain);
   done(detail, r.ok ? "ok" : "err");
+}
+
+/**
+ * 발신 계정의 워밍업 설정.
+ *
+ * 하루 상한 자체는 입력받지 않는다 — 계정 나이에서 계산한다. 운영자가 급할 때
+ * 숫자를 직접 올리는 것이 정확히 도메인이 타는 경로이기 때문이다. 여기서 정할 수
+ * 있는 것은 세 가지뿐이다: 계정이 며칠 됐는지, 하드 실링, 워밍업을 끌 것인지.
+ */
+export async function savePace(form: FormData): Promise<void> {
+  const id = String(form.get("id") ?? "");
+  if (!id) done("발신 계정을 찾을 수 없습니다.", "err");
+
+  const raw = String(form.get("age") ?? "").trim();
+  const age = raw === "" ? null : Number(raw);
+  if (age !== null && (!Number.isInteger(age) || age < 0 || age > 20000)) {
+    done("계정 나이는 0 이상의 일수로 넣으세요.", "err");
+  }
+
+  const cap = Number(String(form.get("cap") ?? ""));
+  if (!Number.isInteger(cap) || cap < 1 || cap > 2000) {
+    done("하드 실링은 1~2000 사이의 값이어야 합니다.", "err");
+  }
+
+  const warmup = String(form.get("warmup") ?? "") === "on";
+
+  await run(
+    `UPDATE sender SET account_age_d=$2, daily_cap=$3, warmup_on=$4 WHERE id=$1`,
+    [id, age, cap, warmup]);
+
+  const b = await pace.budget(
+    String(form.get("channel") ?? "email"), String(form.get("identifier") ?? ""));
+  done(`저장했습니다 — 오늘 상한 ${b.capToday}건 (${b.reason})`);
 }

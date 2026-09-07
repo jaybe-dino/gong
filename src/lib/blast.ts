@@ -7,6 +7,7 @@ import { htmlToText } from "./channels/gmail";
 import * as settings from "./settings";
 import { hasColumn, hasTable } from "./schema";
 import * as track from "./tracking";
+import * as pace from "./pacing";
 import { render, type PolicyRow } from "./template";
 import { channelPolicies } from "./queries";
 
@@ -512,6 +513,11 @@ export interface SendProgress {
   blocked: number;
   remaining: number;
   done: boolean;
+  /**
+   * 상한 때문에 멈췄으면 그 이유. done=false 인데 이 값이 있으면 화면은 이어
+   * 돌리기를 멈춰야 한다 — 계속 호출해도 0건씩 돌아온다.
+   */
+  paced: string | null;
 }
 
 /**
@@ -531,6 +537,22 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
   // 화면을 우회해도 막힌다. 법정 표기가 빈 채로 나가는 경로를 남기지 않는다.
   const pre = await preflight(blastId);
   if (!pre.ok) throw new Error(pre.blockers.join(" · "));
+
+  // 발송량 상한. 자동 채널만 해당한다 — 사람이 붙여넣는 채널은 큐에 쌓는 것이
+  // 발송이 아니므로 여기서 깎으면 하루치만 큐에 들어가고 나머지가 사라진 것처럼
+  // 보인다. 그쪽은 큐 화면에서 사람이 하루에 처리하는 양이 곧 상한이다.
+  const budget = ch.auto ? pre.pace : null;
+  if (budget?.blocked) {
+    const left = await countRemaining(blastId, b.campaign_id);
+    return { sent: 0, queued: 0, blocked: 0, remaining: left, done: left === 0,
+             paced: budget.blocked };
+  }
+  const take = budget ? Math.min(limit, budget.allowedNow) : limit;
+  if (take <= 0) {
+    const left = await countRemaining(blastId, b.campaign_id);
+    return { sent: 0, queued: 0, blocked: 0, remaining: left, done: left === 0,
+             paced: "오늘 보낼 수 있는 여유가 없습니다." };
+  }
 
   await run(`UPDATE blast SET state='sending' WHERE id=$1 AND state <> 'done'`, [blastId]);
 
@@ -554,7 +576,7 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
         AND NOT EXISTS (SELECT 1 FROM outreach_task t WHERE t.campaign_member_id=m.id AND t.blast_id=$4)
       ORDER BY v.followers DESC NULLS LAST, m.id
       LIMIT $2`,
-    [b.campaign_id, limit, b.channel, blastId],
+    [b.campaign_id, take, b.channel, blastId],
   );
 
   const org = await settings.get("mail.org");
@@ -610,13 +632,16 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
       const msgParams: unknown[] = [
         r.member_id, r.contact_id, b.channel, blastId, res.threadKey, res.providerMessageId,
         subject, body, res.dryRun ? "dry_run" : "sent",
+        // 시간당 상한은 message.sender_id 를 세어 계산한다. 여기서 비워 두면
+        // 상한이 영원히 0/12 로 읽히고 분산이 아무 일도 하지 않는다.
+        budget?.senderId ?? null,
       ];
       if (hasTrackToken) msgParams.push(b.track_opens || b.track_clicks ? trackToken : null);
       await run(
         `INSERT INTO message (campaign_member_id, contact_point_id, channel, direction, blast_id,
-                              thread_key, provider_msg_id, subject, body, status
+                              thread_key, provider_msg_id, subject, body, status, sender_id
                               ${hasTrackToken ? ", track_token" : ""})
-         VALUES ($1,$2,$3,'out',$4,$5,$6,$7,$8,$9${hasTrackToken ? ",$10" : ""})`,
+         VALUES ($1,$2,$3,'out',$4,$5,$6,$7,$8,$9,$10${hasTrackToken ? ",$11" : ""})`,
         msgParams);
       await run(
         `UPDATE campaign_member
@@ -624,6 +649,10 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
                 stage_id = GREATEST(stage_id, (SELECT id FROM pipeline_stage WHERE key='contacted'))
           WHERE id=$1`, [r.member_id]);
       sent++;
+      // 성공한 뒤에 깎는다. 미리 깎으면 실패한 건까지 오늘 몫을 먹는다.
+      if (budget?.senderId) await pace.consume(budget.senderId);
+      // 건당 간격. 40건을 1초 안에 밀어 넣는 것도 급증 신호다.
+      if (budget?.gapMs) await sleep(budget.gapMs);
     } catch (e) {
       console.error("[blast]", r.handle, (e as Error).message);
       blocked++;
@@ -634,17 +663,33 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
   // 여기 없는 주소로는 어디로도 보낼 수 없다.
   if (b.track_clicks && links.length) await track.saveLinks(blastId, links);
 
-  const remaining = (await one<{ n: number }>(
-    `SELECT count(*)::int AS n FROM campaign_member m
-      WHERE m.campaign_id=$1
-        AND NOT EXISTS (SELECT 1 FROM message msg WHERE msg.campaign_member_id=m.id AND msg.blast_id=$2)
-        AND NOT EXISTS (SELECT 1 FROM outreach_task t WHERE t.campaign_member_id=m.id AND t.blast_id=$2)`,
-    [b.campaign_id, blastId]))?.n ?? 0;
+  const remaining = await countRemaining(blastId, b.campaign_id);
 
   if (remaining === 0) {
     await run(`UPDATE blast SET state='done', sent_at=COALESCE(sent_at, now()) WHERE id=$1`, [blastId]);
   }
-  return { sent, queued, blocked, remaining, done: remaining === 0 };
+  // 상한에 걸려 청크가 잘렸으면 화면에 알려야 한다. 그냥 remaining 만 돌려주면
+  // 화면이 끝없이 이어 돌리고, 매번 0건이 나가면서 다 끝난 것처럼 보인다.
+  const paced = budget && sent >= take && remaining > 0
+    ? `오늘 몫 ${budget.capToday}건을 다 썼습니다 — 남은 ${remaining.toLocaleString("ko-KR")}명은 내일 이어서 보내세요.`
+    : null;
+  return { sent, queued, blocked, remaining, done: remaining === 0, paced };
+}
+
+/** 지터를 섞은 대기. 정확히 같은 간격으로 나가는 것도 사람 같지 않다. */
+function sleep(ms: number): Promise<void> {
+  const jittered = ms + Math.floor(Math.random() * ms);
+  return new Promise((r) => setTimeout(r, jittered));
+}
+
+/** 아직 메시지도 작업도 만들어지지 않은 대상 수. */
+async function countRemaining(blastId: string, campaignId: string): Promise<number> {
+  return (await one<{ n: number }>(
+    `SELECT count(*)::int AS n FROM campaign_member m
+      WHERE m.campaign_id=$1
+        AND NOT EXISTS (SELECT 1 FROM message msg WHERE msg.campaign_member_id=m.id AND msg.blast_id=$2)
+        AND NOT EXISTS (SELECT 1 FROM outreach_task t WHERE t.campaign_member_id=m.id AND t.blast_id=$2)`,
+    [campaignId, blastId]))?.n ?? 0;
 }
 
 export interface BlastResult {
@@ -670,17 +715,23 @@ export interface Preflight {
   ok: boolean;
   blockers: string[];
   warnings: string[];
+  /** 오늘 이 발신 계정으로 보낼 수 있는 여유. 없으면 페이스 규칙이 없는 채널이다. */
+  pace: pace.Budget | null;
 }
 
 export async function preflight(blastId: string): Promise<Preflight> {
   const b = await getBlast(blastId);
   const blockers: string[] = [];
   const warnings: string[] = [];
-  if (!b) return { ok: false, blockers: ["발송을 찾을 수 없습니다."], warnings };
+  if (!b) return { ok: false, blockers: ["발송을 찾을 수 없습니다."], warnings, pace: null };
 
   const ch = channelSpec(b.channel);
   if (!b.body?.trim()) blockers.push("본문이 비어 있습니다.");
   if (!b.campaign_id || b.target_count === 0) blockers.push("대상이 확정되지 않았습니다.");
+
+  // 같은 문장을 대량으로 보내는 것이 스팸으로 분류되는 가장 빠른 길이다. 막지는
+  // 않되 발송 버튼 옆에서 보이게 한다.
+  if (b.body?.trim()) warnings.push(...pace.diversityWarnings(b.subject, b.body));
 
   const policy = await policyFor(b.channel, b.is_ad);
   if (policy?.requires_optout) {
@@ -697,14 +748,27 @@ export async function preflight(blastId: string): Promise<Preflight> {
     }
   }
 
+  let budget: pace.Budget | null = null;
   if (ch.auto) {
     const from = b.mailbox_email ?? (await defaultMailbox());
     if (!from) blockers.push("보낼 메일함이 없습니다 (설정 → 메일함).");
     if (!isSaConfigured()) {
       warnings.push("서비스 계정 키가 없어 전부 dry-run 으로 처리됩니다 — 실제로 나가지 않습니다.");
     }
+    if (from) {
+      budget = await pace.budget(b.channel, from, await settings.fromName());
+      // 상한 도달은 blocker 가 아니다 — 오늘 몫을 이미 보냈다는 뜻이고, 내일 이어
+      // 보내면 된다. 여기서 blocker 로 만들면 발송 자체가 실패한 것처럼 보인다.
+      if (budget.blocked && budget.capToday === 0) blockers.push(budget.blocked);
+      else if (budget.blocked) warnings.push(budget.blocked);
+      else if (b.target_count > budget.remaining) {
+        warnings.push(
+          `대상 ${b.target_count.toLocaleString("ko-KR")}명 중 오늘은 ${budget.remaining}명까지 나갑니다 ` +
+          `(${budget.reason}). 나머지는 내일 이어서 보내세요.`);
+      }
+    }
   }
-  return { ok: blockers.length === 0, blockers, warnings };
+  return { ok: blockers.length === 0, blockers, warnings, pace: budget };
 }
 
 /**

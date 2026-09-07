@@ -28,6 +28,9 @@ export default function SendRunner({
   const [running, setRunning] = useState(false);
   const [st, setSt] = useState<{ sent: number; queued: number; blocked: number; remaining: number } | null>(null);
   const [err, setErr] = useState<string | null>(null);
+  // 상한에 걸려 멈춘 것은 오류가 아니다. 오류로 보여 주면 다시 누르게 되고,
+  // 다시 눌러도 0건이 나가면서 무언가 고장난 것처럼 보인다.
+  const [paced, setPaced] = useState<string | null>(null);
   const loop = useRef(false);
 
   useEffect(() => {
@@ -48,6 +51,11 @@ export default function SendRunner({
           setSt({ ...acc });
           if (r.done) {
             router.push(`/blast/${blastId}?step=5`);
+            return;
+          }
+          // 오늘 몫을 다 썼으면 이어 돌리지 않는다. 계속 호출해도 0건이다.
+          if (r.paced) {
+            setPaced(r.paced);
             return;
           }
         }
@@ -94,7 +102,17 @@ export default function SendRunner({
           : "시작 중…"}
       </div>
       {err && <p className="bad" style={{ marginTop: 10 }}>{err}</p>}
-      {!err && <p className="subnote" style={{ marginTop: 8 }}>이 탭을 닫아도 보낸 것은 남습니다.</p>}
+      {paced && (
+        <div className="pacestop">
+          <b>오늘 발송을 여기서 멈췄습니다.</b>
+          <p>{paced}</p>
+          <p className="subnote">
+            도메인 평판을 지키려고 일부러 멈추는 것입니다. 내일 이 화면에 다시 들어와
+            같은 버튼을 누르면 남은 대상부터 이어집니다.
+          </p>
+        </div>
+      )}
+      {!err && !paced && <p className="subnote" style={{ marginTop: 8 }}>이 탭을 닫아도 보낸 것은 남습니다.</p>}
     </div>
   );
 }

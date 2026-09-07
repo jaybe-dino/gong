@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 // 타입 전용 import 는 실행 시 제거된다. 동적 import 로 받은 D 는 값이라 타입에 못 쓴다.
 import type { Incoming, MatchResult } from "../src/lib/dedupe.ts";
+import * as pacing from "../src/lib/pacing.ts";
 
 const H = await import("../src/lib/handle.ts");
 const P = await import("../src/lib/parse.ts");
@@ -740,4 +741,70 @@ test("메일은 MIME 규격을 지킨다 — 줄 길이·인코딩 워드·CRLF�
   const body = Buffer.from(lines.slice(blank + 1).join(""), "base64").toString("utf8");
   assert.match(body, /\r\n\r\n두 번째 문단입니다\.\r\n마지막 줄\./);
   assert.doesNotMatch(body, /[^\r]\n/, "LF 단독 줄바꿈이 남아 있다");
+});
+
+// ── 발송 페이스 ──────────────────────────────────────────────────────
+// sendChunk 가 sender 를 보지 않아서 대상 전원이 한 번에 나가던 구멍을 막은 뒤,
+// 상한 계산이 규칙대로인지 고정한다.
+
+test("워밍업 상한 — 계정 나이가 상한을 정한다", () => {
+  assert.equal(pacing.rampCap("email", 0), 5);
+  assert.equal(pacing.rampCap("email", 6), 5);
+  assert.equal(pacing.rampCap("email", 7), 10);
+  assert.equal(pacing.rampCap("email", 14), 12);
+  assert.equal(pacing.rampCap("email", 30), 20);
+  assert.equal(pacing.rampCap("email", 400), 50);
+});
+
+test("나이를 모르면 가장 보수적인 값 — 새 메일함으로 대량 발송하는 사고를 막는다", () => {
+  assert.equal(pacing.rampCap("email", null), 5);
+  assert.equal(pacing.rampCap("instagram_dm", null), 0);
+});
+
+test("인스타 DM 첫 주는 0건 — 만든 계정으로 바로 콜드 DM 을 보내면 그날 막힌다", () => {
+  assert.equal(pacing.rampCap("instagram_dm", 3), 0);
+  assert.equal(pacing.rampCap("instagram_dm", 7), 5);
+  assert.equal(pacing.rampCap("instagram_dm", 14), 10);
+  assert.equal(pacing.rampCap("instagram_dm", 30), 30);
+  assert.equal(pacing.rampCap("instagram_dm", 180), 70);
+});
+
+test("단계 사이가 두 배를 넘지 않는다 — 볼륨 급증이 계정이 찍히는 가장 흔한 원인", () => {
+  for (const rule of pacing.RULES) {
+    // ramp 는 큰 나이부터 적혀 있다. 낮은 쪽부터 보려면 뒤집는다.
+    const caps = [...rule.ramp].reverse().map((r) => r.cap).filter((c) => c > 0);
+    for (let i = 1; i < caps.length; i++) {
+      assert.ok(caps[i] <= caps[i - 1] * 2,
+        `${rule.channel}: ${caps[i - 1]} → ${caps[i]} 는 두 배를 넘는다`);
+    }
+  }
+});
+
+test("규칙이 없는 채널은 사람이 손으로 하므로 막지 않는다", () => {
+  assert.equal(pacing.ruleFor("inpock_offer").channel, "manual");
+  assert.ok(pacing.rampCap("inpock_offer", 0) > 0);
+});
+
+test("문안 다양화 — 변수 없는 본문은 전원에게 같은 문장이 나간다고 경고한다", () => {
+  const w = pacing.diversityWarnings("공구 제안", "안녕하세요, 저희는 디노스튜디오입니다. ".repeat(6));
+  assert.ok(w.some((x) => x.includes("치환 변수가 없습니다")));
+});
+
+test("문안 다양화 — 변수가 있고 길이가 충분하면 그 경고는 없다", () => {
+  const body = "{{name}}님 안녕하세요. 디노스튜디오에서 공구를 기획하는 담당자입니다. " +
+               "{{handle}} 계정의 게시물을 보고, 저희가 이번에 준비하는 리빙 카테고리 공구와 " +
+               "결이 잘 맞을 것 같아 연락드렸습니다. 조건과 일정은 회신해 주시면 정리해 보내드리겠습니다. " +
+               "편하실 때 답장 부탁드립니다.";
+  const w = pacing.diversityWarnings("공구 제안", body);
+  assert.ok(!w.some((x) => x.includes("치환 변수")));
+  assert.ok(!w.some((x) => x.includes("본문이 짧습니다")));
+});
+
+test("문안 다양화 — 단축 URL · 과장 표현 · 링크 과다를 잡는다", () => {
+  const body = "{{name}}님 무료 체험 당첨! 지금 바로 https://bit.ly/x 클릭 " +
+               "https://a.com https://b.com https://c.com https://d.com";
+  const w = pacing.diversityWarnings(null, body);
+  assert.ok(w.some((x) => x.includes("단축 URL")));
+  assert.ok(w.some((x) => x.includes("과장 표현")));
+  assert.ok(w.some((x) => x.includes("링크가")));
 });
