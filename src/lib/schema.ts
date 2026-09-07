@@ -22,6 +22,7 @@ export const EXPECTED_MIGRATIONS = [
   "009_campaign_status.sql",
   "010_category_dino.sql",
   "011_blast.sql",
+  "012_blast_ad_label.sql",
 ];
 
 const tableCache = new Map<string, boolean>();

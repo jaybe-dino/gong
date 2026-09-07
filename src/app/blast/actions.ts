@@ -81,9 +81,12 @@ export async function saveContent(form: FormData): Promise<void> {
   const id = String(form.get("id") ?? "");
   const body = String(form.get("body") ?? "");
   const subject = String(form.get("subject") ?? "").trim() || null;
+  const isAd = form.get("isAd") === "1";
   if (!body.trim()) go(id, 3, "본문을 입력하세요.", "err");
-  await B.saveContent(id, subject, body);
-  go(id, 3, "문안을 저장했습니다.");
+  await B.saveContent(id, subject, body, isAd);
+  go(id, 3, isAd
+    ? "저장했습니다. (광고) 표기와 수신거부 안내가 붙습니다."
+    : "저장했습니다. 광고성 정보가 아니라고 표시했으므로 (광고) 표기를 붙이지 않습니다 — 판단은 형 책임입니다.");
 }
 
 /** 3단계 — 테스트 발송. 우리가 받아본다. */
@@ -95,7 +98,7 @@ export async function testSend(form: FormData): Promise<void> {
   // 저장하지 않은 문안으로 테스트하면 "보낸 것과 다른 것" 을 보게 된다.
   const body = String(form.get("body") ?? "");
   const subject = String(form.get("subject") ?? "").trim() || null;
-  if (body.trim()) await B.saveContent(id, subject, body);
+  if (body.trim()) await B.saveContent(id, subject, body, form.get("isAd") === "1");
 
   const r = await B.sendTest(id, to);
   go(id, 3, r.detail, r.ok ? "ok" : "err");

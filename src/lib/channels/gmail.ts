@@ -59,13 +59,57 @@ export interface OutboundMessage {
   references?: string | null;
 }
 
-/** RFC 2822 조립. 한글 제목·표시명은 base64 로 인코딩한다. */
-export function buildRaw(msg: OutboundMessage): string {
+/**
+ * RFC 2047 인코딩 워드. 한글 제목·표시명을 base64 로 싣는다.
+ *
+ * 한 워드는 75자를 넘을 수 없다(§2). 넘으면 여러 워드로 쪼개고 CRLF+공백으로
+ * 잇는다. 쪼갤 때 UTF-8 멀티바이트 문자를 가로지르면 안 되므로 3바이트 배수로
+ * 자른다 — 한글이 3바이트라 딱 맞는다.
+ *
+ * 전에는 제목을 워드 하나로 만들어 117자가 나갔다. 규격 위반이고, 받는 쪽
+ * 필터가 헤더 이상을 점수에 넣는다.
+ */
+function encodeWords(text: string): string {
+  const buf = Buffer.from(text, "utf8");
+  // "=?UTF-8?B?" (10) + "?=" (2) = 12. 75 - 12 = 63자 → base64 63자는 원문 45바이트.
+  const CHUNK = 45;
+  if (buf.length <= CHUNK) return `=?UTF-8?B?${buf.toString("base64")}?=`;
+
+  const words: string[] = [];
+  for (let i = 0; i < buf.length; i += CHUNK) {
+    words.push(`=?UTF-8?B?${buf.subarray(i, i + CHUNK).toString("base64")}?=`);
+  }
+  return words.join("\r\n ");
+}
+
+/**
+ * base64 본문을 76자로 접는다.
+ *
+ * RFC 2045 §6.8 이 76자 상한을 정한다. 전에는 본문 전체를 한 줄로 내보냈다 —
+ * 600자가 넘는 줄이었고, 네이버·다음처럼 엄격한 수신 서버가 이걸 점수에 넣는다.
+ */
+function foldBase64(b64text: string): string {
+  const out: string[] = [];
+  for (let i = 0; i < b64text.length; i += 76) out.push(b64text.slice(i, i + 76));
+  return out.join("\r\n");
+}
+
+/**
+ * RFC 5322 날짜. Gmail API 가 없으면 채워 주지만, 우리가 넣는 편이 낫다 —
+ * 규격에 맞는 메일을 만들어 놓고 받는 쪽 관용에 기대지 않는다.
+ */
+function rfc5322Date(d = new Date()): string {
+  return d.toUTCString().replace("GMT", "+0000");
+}
+
+/** RFC 5322 조립. */
+export function buildRaw(msg: OutboundMessage, now = new Date()): string {
   const lines: string[] = [];
-  lines.push(`From: ${msg.fromName ? `=?UTF-8?B?${b64(msg.fromName)}?= ` : ""}<${msg.from}>`);
+  lines.push(`From: ${msg.fromName ? `${encodeWords(msg.fromName)} ` : ""}<${msg.from}>`);
   lines.push(`To: ${msg.to}`);
+  lines.push(`Date: ${rfc5322Date(now)}`);
   if (msg.replyTo) lines.push(`Reply-To: ${msg.replyTo}`);
-  if (msg.subject) lines.push(`Subject: =?UTF-8?B?${b64(msg.subject)}?=`);
+  if (msg.subject) lines.push(`Subject: ${encodeWords(msg.subject)}`);
   if (msg.inReplyTo) lines.push(`In-Reply-To: ${msg.inReplyTo}`);
   if (msg.references) lines.push(`References: ${msg.references}`);
   for (const [k, v] of Object.entries(msg.headers ?? {})) lines.push(`${k}: ${v}`);
@@ -73,7 +117,9 @@ export function buildRaw(msg: OutboundMessage): string {
   lines.push('Content-Type: text/plain; charset="UTF-8"');
   lines.push("Content-Transfer-Encoding: base64");
   lines.push("");
-  lines.push(b64(msg.body));
+  // 본문 줄바꿈도 CRLF 여야 한다. text/plain 의 정규 형식이 그렇고, LF 만
+  // 들어가면 일부 수신 서버가 본문을 한 줄로 붙여 버린다.
+  lines.push(foldBase64(b64(msg.body.replace(/\r?\n/g, "\r\n"))));
   return Buffer.from(lines.join("\r\n")).toString("base64url");
 }
 

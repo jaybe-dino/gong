@@ -237,6 +237,8 @@ export interface Blast {
   subject: string | null;
   body: string | null;
   filters: Filters;
+  /** 영리목적 광고성 정보인가. (광고) 표기와 수신거부 푸터가 여기에 달려 있다. */
+  is_ad: boolean;
   state: string;
   target_count: number;
   created_at: string;
@@ -246,7 +248,7 @@ export interface Blast {
 export async function getBlast(id: string): Promise<Blast | null> {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
   return (await one<Blast>(
-    `SELECT id, name, channel, campaign_id, mailbox_email, subject, body, filters, state,
+    `SELECT id, name, channel, campaign_id, mailbox_email, subject, body, filters, is_ad, state,
             target_count, to_char(created_at,'MM-DD HH24:MI') AS created_at,
             to_char(sent_at,'MM-DD HH24:MI') AS sent_at
        FROM blast WHERE id=$1`, [id])) ?? null;
@@ -279,10 +281,12 @@ export async function saveFilters(id: string, f: Filters, mailbox: string | null
     [id, JSON.stringify(f), mailbox]);
 }
 
-export async function saveContent(id: string, subject: string | null, body: string): Promise<void> {
+export async function saveContent(
+  id: string, subject: string | null, body: string, isAd: boolean,
+): Promise<void> {
   await run(
-    `UPDATE blast SET subject=$2, body=$3, updated_at=now() WHERE id=$1`,
-    [id, subject, body]);
+    `UPDATE blast SET subject=$2, body=$3, is_ad=$4, updated_at=now() WHERE id=$1`,
+    [id, subject, body, isAd]);
 }
 
 /** 치환 변수. 문안 화면이 그대로 안내한다. */
@@ -329,7 +333,7 @@ export async function renderForSend(
   const bare = replyToken ? gmail.bareToken(replyToken) : null;
 
   return render(
-    { subject: b.subject, body: b.body ?? "", is_ad_content: true, channel: b.channel },
+    { subject: b.subject, body: b.body ?? "", is_ad_content: b.is_ad, channel: b.channel },
     vars,
     policy,
     {
@@ -341,10 +345,18 @@ export async function renderForSend(
   );
 }
 
-/** 이 채널의 정책. (광고) 표기·수신거부 필수 여부가 여기서 나온다. */
-export async function policyFor(channel: string): Promise<PolicyRow | null> {
+/**
+ * 이 채널의 정책. (광고) 표기·수신거부 필수 여부가 여기서 나온다.
+ *
+ * 광고성 정보가 아니라고 표시한 발송에는 표기를 붙이지 않는다 — 광고가 아닌
+ * 1:1 제안에 (광고) 를 붙이면 그게 오히려 사실과 다르고, 받는 쪽 필터도
+ * 광고함으로 보낸다.
+ */
+export async function policyFor(channel: string, isAd = true): Promise<PolicyRow | null> {
   const rows = await channelPolicies().catch(() => []);
-  return (rows.find((p) => p.channel === channel) as PolicyRow | undefined) ?? null;
+  const p = (rows.find((x) => x.channel === channel) as PolicyRow | undefined) ?? null;
+  if (!p || isAd) return p;
+  return { ...p, requires_ad_label: false, requires_optout: false };
 }
 
 /**
@@ -368,7 +380,7 @@ export async function sendTest(blastId: string, to: string): Promise<{ ok: boole
   };
   // 실제 발송과 같은 렌더러를 거친다. 테스트가 법정 표기를 빼고 나가면
   // "무엇이 나가는지" 를 확인하는 목적 자체가 사라진다.
-  const policy = await policyFor(b.channel);
+  const policy = await policyFor(b.channel, b.is_ad);
   const r = await renderForSend(b, vars, "cm_testtoken", policy);
   const body = r.body +
     `\n\n---\n[테스트 발송] 실제 대상에게는 보내지 않았습니다. 치환 값은 첫 대상(${vars.handle})의 것이고, ` +
@@ -450,7 +462,7 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
   const org = await settings.get("mail.org");
   const base = await settings.get("mail.address");
   const from = b.mailbox_email ?? (await defaultMailbox());
-  const policy = await policyFor(b.channel);
+  const policy = await policyFor(b.channel, b.is_ad);
   const display = await settings.fromName();
 
   let sent = 0, queued = 0, blocked = 0;
@@ -552,7 +564,7 @@ export async function preflight(blastId: string): Promise<Preflight> {
   if (!b.body?.trim()) blockers.push("본문이 비어 있습니다.");
   if (!b.campaign_id || b.target_count === 0) blockers.push("대상이 확정되지 않았습니다.");
 
-  const policy = await policyFor(b.channel);
+  const policy = await policyFor(b.channel, b.is_ad);
   if (policy?.requires_optout) {
     const [postal, phone, baseUrl] = await Promise.all([
       settings.get("mail.postal"), settings.get("mail.phone"), settings.get("app.base_url"),
@@ -593,7 +605,7 @@ export async function previewFinal(blastId: string): Promise<RenderedBlast | nul
     name: sample?.display_name ?? "홍길동",
     followers: sample?.followers ? sample.followers.toLocaleString("ko-KR") : "12,000",
     org,
-  }, "cm_preview0", await policyFor(b.channel));
+  }, "cm_preview0", await policyFor(b.channel, b.is_ad));
 }
 
 export async function results(blastId: string): Promise<BlastResult> {

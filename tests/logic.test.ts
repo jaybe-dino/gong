@@ -689,3 +689,55 @@ test("카테고리 표기를 표준으로 옮기고, 붙어 있는 것도 뽑아
   // 매핑에 없는 말은 지어내지 않고 그대로 남긴다. 점수에는 반영되지 않는다.
   assert.deepEqual(I.canonicalShare({ "기타": 100 }, "dino", map), { 기타: 100 });
 });
+
+test("메일은 MIME 규격을 지킨다 — 줄 길이·인코딩 워드·CRLF·Date", async () => {
+  // 회귀: 본문 base64 를 한 줄(600자+)로, 제목을 인코딩 워드 하나(117자)로
+  // 내보냈다. 둘 다 규격 위반이고 Date 헤더도 없었다. 받는 쪽 필터가 헤더·본문
+  // 이상을 점수에 넣는다 — 첫 메일이 스팸으로 간 원인 중 하나였다.
+  const { buildRaw } = await import("../src/lib/channels/gmail.ts");
+
+  const long = "안녕하세요 홍길동 님, ".repeat(20);
+  const raw = buildRaw({
+    from: "main@diboutique.com",
+    fromName: "디노스튜디오 파트너십 사업본부",
+    to: "someone@naver.com",
+    replyTo: "main+cm_abc123@diboutique.com",
+    subject: "(광고) 홈멍멍 최혜미 님, 9월 리빙 공구 제안드립니다 — 상세 조건 안내",
+    body: `${long}\n\n두 번째 문단입니다.\n마지막 줄.`,
+    headers: { "List-Unsubscribe": "<https://www.diboutique.com/u/abc>" },
+  }, new Date("2026-09-07T04:00:00Z"));
+
+  const txt = Buffer.from(raw, "base64url").toString("utf8");
+  const lines = txt.split("\r\n");
+
+  // 1. 헤더 순서·존재
+  assert.match(txt, /^From: /, "From 이 첫 줄이어야 한다");
+  assert.match(txt, /\r\nDate: .+\+0000\r\n/, "RFC 5322 Date 헤더가 있어야 한다");
+
+  // 2. RFC 2047 — 인코딩 워드 하나는 75자를 넘을 수 없다.
+  for (const w of txt.match(/=\?UTF-8\?B\?[^?]*\?=/g) ?? []) {
+    assert.ok(w.length <= 75, `인코딩 워드가 75자를 넘는다 (${w.length}자)`);
+  }
+  // 긴 제목은 여러 워드로 쪼개져 CRLF+공백으로 이어진다.
+  assert.match(txt, /\r\n =\?UTF-8\?B\?/, "긴 제목이 접히지 않았다");
+
+  // 3. 쪼갠 워드를 다시 붙이면 원문이 나와야 한다 — UTF-8 문자를 가로지르면 깨진다.
+  const subjectRaw = txt.match(/\r\nSubject: ((?:.|\r\n )+?)\r\n(?![ \t])/)![1];
+  const decoded = (subjectRaw.match(/=\?UTF-8\?B\?([^?]*)\?=/g) ?? [])
+    .map((w) => Buffer.from(w.replace(/^=\?UTF-8\?B\?/, "").replace(/\?=$/, ""), "base64"))
+    .reduce((a, b) => Buffer.concat([a, b]), Buffer.alloc(0))
+    .toString("utf8");
+  assert.equal(decoded, "(광고) 홈멍멍 최혜미 님, 9월 리빙 공구 제안드립니다 — 상세 조건 안내");
+
+  // 4. RFC 2045 §6.8 — base64 본문 줄은 76자 이하.
+  const blank = lines.indexOf("");
+  assert.ok(blank > 0, "헤더와 본문 사이 빈 줄이 있어야 한다");
+  for (const l of lines.slice(blank + 1)) {
+    assert.ok(l.length <= 76, `본문 base64 줄이 76자를 넘는다 (${l.length}자)`);
+  }
+
+  // 5. 본문 줄바꿈은 CRLF. LF 만 들어가면 일부 수신 서버가 한 줄로 붙인다.
+  const body = Buffer.from(lines.slice(blank + 1).join(""), "base64").toString("utf8");
+  assert.match(body, /\r\n\r\n두 번째 문단입니다\.\r\n마지막 줄\./);
+  assert.doesNotMatch(body, /[^\r]\n/, "LF 단독 줄바꿈이 남아 있다");
+});

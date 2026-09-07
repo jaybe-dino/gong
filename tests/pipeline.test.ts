@@ -1049,7 +1049,7 @@ test("자동 발송이 아닌 채널은 메일을 보내지 않고 작업 큐로
   // 지역 변수 이름을 n 으로 두면 모듈 상단의 카운트 헬퍼 n() 을 가린다.
   const targets = await B.materialize(id);
   if (targets === 0) return;
-  await B.saveContent(id, null, "{{name}} 님, 제안드립니다.");
+  await B.saveContent(id, null, "{{name}} 님, 제안드립니다.", true);
 
   const msgBefore = await n("message");
   const r = await B.sendChunk(id, 10);
@@ -1085,7 +1085,7 @@ test("법정 표기가 비면 발송을 막는다", async () => {
   const id = await B.createBlast("표기 점검", "email", JAY);
   await B.saveFilters(id, { limit: 1 }, "main@diboutique.com");
   await B.materialize(id);
-  await B.saveContent(id, "제안드립니다", "안녕하세요 {{name}} 님.");
+  await B.saveContent(id, "제안드립니다", "안녕하세요 {{name}} 님.", true);
 
   // 사업장 주소·연락처를 비운다.
   await run(`DELETE FROM app_setting WHERE key IN ('mail.postal','mail.phone')`);

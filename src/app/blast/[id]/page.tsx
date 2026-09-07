@@ -216,6 +216,26 @@ export default async function BlastPage({
                 </div>
               </Card>
 
+              <Card title="광고성 정보 표기" hint="도달률과 법규가 정면으로 부딪히는 자리입니다">
+                <div className="card-b">
+                  <label className="chk" style={{ marginBottom: 10 }}>
+                    <input type="checkbox" name="isAd" value="1" defaultChecked={b.is_ad} />
+                    <span><b>영리목적 광고성 정보입니다</b> — 제목에 (광고), 본문에 수신거부 안내를 붙입니다</span>
+                  </label>
+                  <Note tone="warn">
+                    <b>이건 형이 판단해야 하는 항목입니다.</b> 네이버·다음·Gmail 은 제목의 <code className="mono">(광고)</code>
+                    를 보고 광고·스팸함으로 보냅니다 — 필터의 <b>의도된 동작</b>입니다. 그래서 표기를 붙이면
+                    대다수가 광고함으로 가고, 떼면 도달률은 오르지만 정보통신망법 §50 위반 위험을 집니다
+                    (수신 동의 없는 영리목적 광고성 정보는 제목에 (광고) 표기가 필수, 위반 시 과태료).
+                    둘 다 만족하는 선택지는 없습니다.
+                    <br /><br />
+                    판단 기준은 <b>내용</b>입니다. 상품·할인·판매를 알리는 메일이면 광고성 정보입니다. 특정
+                    크리에이터에게 개별 조건으로 제휴를 문의하는 1:1 거래 제안은 다르게 볼 여지가 있지만,
+                    그 판단은 법률 검토를 받으시는 편이 안전합니다. 애매하면 켜 두세요.
+                  </Note>
+                </div>
+              </Card>
+
               <Card title="테스트 발송" hint="실제 대상이 아니라 우리가 받아봅니다">
                 <div className="card-b">
                   <div className="filterbar" style={{ gap: 8 }}>
@@ -229,6 +249,12 @@ export default async function BlastPage({
                     <b>첫 대상의 실제 값</b>으로 채웁니다 — 빈 칸으로 보내면{" "}
                     <code className="mono">{"{{name}}"} 님</code> 이 그대로 나가는지 알 수 없습니다.
                     {!ch.auto && <> 이 채널은 자동 발송이 아니지만, 문안 확인용으로 메일로 보내 드립니다.</>}
+                  </Note>
+                  <Note tone="warn">
+                    <b>우리 도메인 주소로 테스트하면 스팸 판정을 확인할 수 없습니다.</b> 같은 Workspace 안에서
+                    주고받는 메일은 필터를 거의 거치지 않고 들어옵니다 — 통로가 열렸다는 것만 알려주고,
+                    실제로 받은편지함에 꽂히는지는 알려주지 않습니다. <b>네이버·다음·Gmail 주소</b> 각각으로
+                    한 통씩 보내서 어느 폴더에 들어가는지 직접 확인하세요.
                   </Note>
                 </div>
               </Card>
