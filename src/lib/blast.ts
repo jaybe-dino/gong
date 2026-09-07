@@ -1,10 +1,12 @@
 import { all, one, run } from "./db";
 import { ENGINE } from "./states";
 import { CATEGORY_KEYS } from "./score";
-import { defaultMailbox, mailboxes } from "./google-sa";
+import { defaultMailbox, isConfigured as isSaConfigured, mailboxes } from "./google-sa";
 import { gmail } from "./channels";
 import * as settings from "./settings";
 import { hasTable } from "./schema";
+import { render, type PolicyRow } from "./template";
+import { channelPolicies } from "./queries";
 
 /**
  * 발송 (blast) — 채널 하나, 대상 한 묶음, 문안 하나.
@@ -296,6 +298,56 @@ export function fillVars(body: string, v: Record<string, string>): string {
 }
 
 /**
+ * 발송용 최종 문안.
+ *
+ * 여기를 거치지 않고 본문을 그대로 보내면 안 된다. 콜드 광고 메일에는
+ * (광고) 표기와 수신거부 방법이 있어야 한다 — 정보통신망법 §50 이고, 없으면
+ * 과태료 대상이며 Gmail·네이버가 스팸으로 분류한다.
+ *
+ * 처음 만들 때 이 단계를 빼먹어서 본문이 그대로 나가게 돼 있었다. 화면에서는
+ * 아무 문제가 없어 보인다 — 그래서 렌더 경로를 하나로 좁히고, 미리보기도
+ * 같은 함수를 쓰게 한다.
+ */
+export interface RenderedBlast {
+  subject: string | null;
+  body: string;
+  headers: Record<string, string>;
+  warnings: string[];
+}
+
+export async function renderForSend(
+  b: Blast,
+  vars: Record<string, string>,
+  replyToken: string | null,
+  policy: PolicyRow | null,
+): Promise<RenderedBlast> {
+  const [org, address, phone, postal, unsubBase] = await Promise.all([
+    settings.get("mail.org"), settings.get("mail.address"),
+    settings.get("mail.phone"), settings.get("mail.postal"), settings.unsubBase(),
+  ]);
+  const [local, domain] = address.split("@");
+  const bare = replyToken ? gmail.bareToken(replyToken) : null;
+
+  return render(
+    { subject: b.subject, body: b.body ?? "", is_ad_content: true, channel: b.channel },
+    vars,
+    policy,
+    {
+      orgName: org, address, phone, postalAddress: postal,
+      unsubUrl: bare ? `${unsubBase}/${bare}` : undefined,
+      unsubMailto: bare ? `${local}+unsub_${bare}@${domain}` : undefined,
+      displayName: org,
+    },
+  );
+}
+
+/** 이 채널의 정책. (광고) 표기·수신거부 필수 여부가 여기서 나온다. */
+export async function policyFor(channel: string): Promise<PolicyRow | null> {
+  const rows = await channelPolicies().catch(() => []);
+  return (rows.find((p) => p.channel === channel) as PolicyRow | undefined) ?? null;
+}
+
+/**
  * 테스트 발송. 실제 대상이 아니라 우리가 받아본다.
  *
  * 치환 변수는 첫 대상의 값으로 채운다 — 빈 칸으로 보내면 "{{name}} 님" 이
@@ -314,8 +366,13 @@ export async function sendTest(blastId: string, to: string): Promise<{ ok: boole
     followers: sample?.followers ? sample.followers.toLocaleString("ko-KR") : "12,000",
     org,
   };
-  const body = fillVars(b.body, vars) +
-    `\n\n---\n[테스트 발송] 실제 대상에게는 보내지 않았습니다. 치환 값은 첫 대상(${vars.handle})의 것입니다.`;
+  // 실제 발송과 같은 렌더러를 거친다. 테스트가 법정 표기를 빼고 나가면
+  // "무엇이 나가는지" 를 확인하는 목적 자체가 사라진다.
+  const policy = await policyFor(b.channel);
+  const r = await renderForSend(b, vars, "cm_testtoken", policy);
+  const body = r.body +
+    `\n\n---\n[테스트 발송] 실제 대상에게는 보내지 않았습니다. 치환 값은 첫 대상(${vars.handle})의 것이고, ` +
+    `수신거부 링크는 테스트용이라 동작하지 않습니다.`;
 
   const from = b.mailbox_email ?? (await defaultMailbox());
   if (!from) {
@@ -325,8 +382,9 @@ export async function sendTest(blastId: string, to: string): Promise<{ ok: boole
   try {
     const res = await gmail.send({
       from, fromName: org, to,
-      subject: `[테스트] ${fillVars(b.subject ?? b.name, vars)}`,
+      subject: `[테스트] ${r.subject ?? b.name}`,
       body,
+      headers: r.headers,
     });
     await settings.testLog("send", !res.dryRun, { detail: `발송 테스트 · ${b.name}` }, null, to);
     return res.dryRun
@@ -358,6 +416,11 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
   if (!b.body?.trim()) throw new Error("본문이 비어 있습니다.");
 
   const ch = channelSpec(b.channel);
+
+  // 화면을 우회해도 막힌다. 법정 표기가 빈 채로 나가는 경로를 남기지 않는다.
+  const pre = await preflight(blastId);
+  if (!pre.ok) throw new Error(pre.blockers.join(" · "));
+
   await run(`UPDATE blast SET state='sending' WHERE id=$1 AND state <> 'done'`, [blastId]);
 
   const rows = await all<{
@@ -386,6 +449,7 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
   const org = await settings.get("mail.org");
   const base = await settings.get("mail.address");
   const from = b.mailbox_email ?? (await defaultMailbox());
+  const policy = await policyFor(b.channel);
 
   let sent = 0, queued = 0, blocked = 0;
   for (const r of rows) {
@@ -395,8 +459,10 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
       followers: r.followers ? r.followers.toLocaleString("ko-KR") : "",
       org,
     };
-    const body = fillVars(b.body, vars);
-    const subject = fillVars(b.subject ?? b.name, vars);
+    // 렌더러가 (광고) 표기와 수신거부를 붙인다. 본문을 그대로 보내면 안 된다.
+    const r0 = await renderForSend(b, vars, r.reply_token, policy);
+    const body = r0.body;
+    const subject = r0.subject ?? b.name;
 
     if (!ch.auto) {
       // 사람이 붙여넣는 채널. 문안과 링크를 큐에 넣는다.
@@ -416,7 +482,7 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
       const res = await gmail.send({
         from: from!, fromName: org, to: r.contact,
         replyTo: r.reply_token ? gmail.replyToAddress(base, r.reply_token) : null,
-        subject, body,
+        subject, body, headers: r0.headers,
       });
       await run(
         `INSERT INTO message (campaign_member_id, contact_point_id, channel, direction, blast_id,
@@ -456,6 +522,76 @@ export interface BlastResult {
   replied: number;
   bounced: number;
   optedOut: number;
+}
+
+/**
+ * 발송 전 점검. 통과하지 못하면 보내지 않는다.
+ *
+ * 법정 표기가 비면 푸터가 "Dinostudio (주) ·  ·  ·" 처럼 빈 칸으로 나간다 —
+ * 표기가 있는 것도 아니고 없는 것도 아닌 상태로 나가는 게 최악이다.
+ * 수신거부 링크도 마찬가지다: 앱 주소가 기본값이면 우리 도메인이 아닌 곳을
+ * 가리키는 링크를 수천 명에게 보낸다.
+ *
+ * 그래서 화면이 아니라 발송 함수가 막는다. 화면만 막으면 다른 경로로 새어 나간다.
+ */
+export interface Preflight {
+  ok: boolean;
+  blockers: string[];
+  warnings: string[];
+}
+
+export async function preflight(blastId: string): Promise<Preflight> {
+  const b = await getBlast(blastId);
+  const blockers: string[] = [];
+  const warnings: string[] = [];
+  if (!b) return { ok: false, blockers: ["발송을 찾을 수 없습니다."], warnings };
+
+  const ch = channelSpec(b.channel);
+  if (!b.body?.trim()) blockers.push("본문이 비어 있습니다.");
+  if (!b.campaign_id || b.target_count === 0) blockers.push("대상이 확정되지 않았습니다.");
+
+  const policy = await policyFor(b.channel);
+  if (policy?.requires_optout) {
+    const [postal, phone, baseUrl] = await Promise.all([
+      settings.get("mail.postal"), settings.get("mail.phone"), settings.get("app.base_url"),
+    ]);
+    if (!postal.trim()) blockers.push("사업장 주소가 비어 있습니다 — 광고 메일 푸터에 법정 필수입니다 (설정 → 발신 정보).");
+    if (!phone.trim()) blockers.push("연락처가 비어 있습니다 — 위와 같은 이유로 필수입니다.");
+
+    const domain = await settings.get("mail.domain");
+    if (domain && !baseUrl.includes(domain)) {
+      blockers.push(
+        `수신거부 링크가 ${baseUrl} 를 가리킵니다. 발송 도메인(${domain})과 달라 링크가 동작하지 않을 수 있습니다 (설정 → 앱 주소).`);
+    }
+  }
+
+  if (ch.auto) {
+    const from = b.mailbox_email ?? (await defaultMailbox());
+    if (!from) blockers.push("보낼 메일함이 없습니다 (설정 → 메일함).");
+    if (!isSaConfigured()) {
+      warnings.push("서비스 계정 키가 없어 전부 dry-run 으로 처리됩니다 — 실제로 나가지 않습니다.");
+    }
+  }
+  return { ok: blockers.length === 0, blockers, warnings };
+}
+
+/**
+ * 발송 전 미리보기 — 실제로 나가는 그대로.
+ *
+ * 화면이 본문만 보여주면 (광고) 표기와 수신거부 푸터가 붙는 걸 모른다.
+ * 발송 버튼을 누르는 자리에서 최종 결과물을 봐야 한다.
+ */
+export async function previewFinal(blastId: string): Promise<RenderedBlast | null> {
+  const b = await getBlast(blastId);
+  if (!b?.body?.trim()) return null;
+  const sample = (await previewTargets(b.channel, b.filters, 1))[0];
+  const org = await settings.get("mail.org");
+  return renderForSend(b, {
+    handle: sample?.handle ?? "example_handle",
+    name: sample?.display_name ?? "홍길동",
+    followers: sample?.followers ? sample.followers.toLocaleString("ko-KR") : "12,000",
+    org,
+  }, "cm_preview0", await policyFor(b.channel));
 }
 
 export async function results(blastId: string): Promise<BlastResult> {

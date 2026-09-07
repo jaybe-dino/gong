@@ -1071,3 +1071,53 @@ test("치환 변수는 실제 값으로 채워지고, 모르는 변수는 지운
   // 값이 없는 변수를 그대로 남기면 "{{name}} 님" 이 그대로 발송된다.
   assert.equal(B.fillVars("{{name}} 님 {{unknown}}", { name: "홍길동" }), "홍길동 님 ");
 });
+
+test("법정 표기가 비면 발송을 막는다", async () => {
+  // 회귀: /blast 를 처음 만들 때 본문을 그대로 보냈다. (광고) 표기도 수신거부도
+  // 붙지 않았다 — 정보통신망법 §50 위반이고, 화면에서는 아무 문제가 없어 보인다.
+  const B = await import("../src/lib/blast.ts");
+  const S = await import("../src/lib/settings.ts");
+
+  // 부분 유니크 인덱스가 기본 발신함을 하나로 강제한다 — 라이브러리를 거쳐 바꾼다.
+  const SA = await import("../src/lib/google-sa.ts");
+  await SA.addMailbox("main@diboutique.com", "대표", "diboutique.com");
+  await SA.setDefaultMailbox("main@diboutique.com");
+  const id = await B.createBlast("표기 점검", "email", JAY);
+  await B.saveFilters(id, { limit: 1 }, "main@diboutique.com");
+  await B.materialize(id);
+  await B.saveContent(id, "제안드립니다", "안녕하세요 {{name}} 님.");
+
+  // 사업장 주소·연락처를 비운다.
+  await run(`DELETE FROM app_setting WHERE key IN ('mail.postal','mail.phone')`);
+  S.invalidate();
+  const withoutEnv = !process.env.MAIL_POSTAL && !process.env.MAIL_PHONE;
+
+  if (withoutEnv) {
+    const pre = await B.preflight(id);
+    assert.equal(pre.ok, false, "표기가 비었는데 통과시키면 안 된다");
+    assert.ok(pre.blockers.some((b) => /사업장 주소/.test(b)), JSON.stringify(pre.blockers));
+    // 화면만 막으면 안 된다 — 발송 함수 자체가 거부해야 한다.
+    await assert.rejects(() => B.sendChunk(id, 1), /사업장 주소|연락처|수신거부 링크/);
+  }
+
+  // 채우면 통과하고, 실제 문안에 표기가 들어간다.
+  await S.save({
+    "mail.postal": "서울시 성동구 아차산로 17길 48",
+    "mail.phone": "02-1234-5678",
+    "app.base_url": "https://www.diboutique.com",
+    "mail.domain": "diboutique.com",
+  }, JAY);
+
+  const pre2 = await B.preflight(id);
+  assert.deepEqual(pre2.blockers, [], "채웠으면 막을 이유가 없다");
+
+  const final = await B.previewFinal(id);
+  assert.ok(final, "미리보기가 나와야 한다");
+  assert.ok(final!.subject?.startsWith("(광고)"), `제목에 (광고) 가 없다: ${final!.subject}`);
+  assert.match(final!.body, /수신거부/, "수신거부 안내가 없다");
+  assert.match(final!.body, /서울시 성동구/, "사업장 주소가 없다");
+  assert.match(final!.body, /02-1234-5678/, "연락처가 없다");
+  // RFC 8058 원클릭 — Gmail·Yahoo 대량 발송자 요구사항
+  assert.equal(final!.headers["List-Unsubscribe-Post"], "List-Unsubscribe=One-Click");
+  assert.match(final!.headers["List-Unsubscribe"] ?? "", /diboutique\.com/);
+});

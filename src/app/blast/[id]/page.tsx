@@ -42,6 +42,9 @@ export default async function BlastPage({
     ch.auto ? B.sendableMailboxes() : Promise.resolve([]),
     step >= 4 ? B.results(id) : Promise.resolve(null),
   ]);
+  // 4단계는 "실제로 나가는 그대로" 를 보여준다 — 법정 표기까지 붙은 상태로.
+  const final = step === 4 ? await B.previewFinal(id) : null;
+  const pre = step === 4 ? await B.preflight(id) : null;
 
   const f = b.filters ?? {};
 
@@ -251,15 +254,44 @@ export default async function BlastPage({
                   <dt>방식</dt><dd>{ch.label}{ch.auto ? " · 자동 발송" : " · 작업 큐"}</dd>
                   <dt>대상</dt><dd><b>{fmt(b.target_count)}명</b></dd>
                   {ch.auto && <><dt>발신함</dt><dd className="mono">{b.mailbox_email ?? "기본 발신함"}</dd></>}
-                  <dt>제목</dt><dd>{b.subject ?? "—"}</dd>
+                  <dt>제목</dt><dd>{final?.subject ?? b.subject ?? "—"}</dd>
                 </dl>
-                <pre className="mono preview">{b.body}</pre>
+                <pre className="mono preview">{final?.body ?? b.body}</pre>
+                {ch.auto && (
+                  <Note>
+                    <b>(광고) 표기와 수신거부 안내는 자동으로 붙습니다</b> — 정보통신망법 §50 이고, 빼면
+                    과태료 대상이며 Gmail·네이버가 스팸으로 분류합니다. 위 미리보기가 실제로 나가는
+                    그대로이며, 치환 값은 첫 대상의 것입니다.
+                  </Note>
+                )}
+                {final?.warnings.length ? (
+                  <Note tone="warn">{final.warnings.join(" · ")}</Note>
+                ) : null}
               </div>
             </Card>
 
-            <Card title={ch.auto ? "발송" : "작업 큐에 넣기"}>
-              <SendRunner blastId={id} total={b.target_count} auto={ch.auto} />
-            </Card>
+            {pre && !pre.ok ? (
+              <Card title="발송할 수 없습니다" hint="아래를 먼저 채우세요">
+                <div className="card-b">
+                  <Note tone="stop">
+                    <b>{pre.blockers.length}가지가 막고 있습니다.</b>
+                    <ul style={{ margin: "8px 0 0", paddingLeft: 18, lineHeight: 1.9 }}>
+                      {pre.blockers.map((x) => <li key={x}>{x}</li>)}
+                    </ul>
+                  </Note>
+                  <a className="btn pri" href="/settings">설정 열기 →</a>
+                </div>
+              </Card>
+            ) : (
+              <Card title={ch.auto ? "발송" : "작업 큐에 넣기"}>
+                {pre?.warnings.length ? (
+                  <div className="card-b" style={{ paddingBottom: 0 }}>
+                    <Note tone="warn">{pre.warnings.join(" · ")}</Note>
+                  </div>
+                ) : null}
+                <SendRunner blastId={id} total={b.target_count} auto={ch.auto} />
+              </Card>
+            )}
           </>
         )}
 
