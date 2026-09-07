@@ -97,6 +97,9 @@ export function isPublicPath(pathname: string): boolean {
   return (
     pathname === "/login" ||
     pathname.startsWith("/u/") ||
+    // 열람 픽셀·클릭 리다이렉트. 받는 사람은 우리 로그인 계정이 없다 —
+    // 로그인 뒤에 두면 이미지가 깨지고 링크가 로그인 화면으로 간다.
+    pathname.startsWith("/t/") ||
     pathname.startsWith("/api/cron/") ||
     pathname.startsWith("/api/admin/") ||
     pathname.startsWith("/_next/") ||

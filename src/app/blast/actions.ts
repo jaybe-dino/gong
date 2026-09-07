@@ -76,14 +76,25 @@ export async function confirmTargets(form: FormData): Promise<void> {
   go(id, 3, `대상 ${n.toLocaleString("ko-KR")}명을 확정했습니다. 이제 보낼 내용을 씁니다.`);
 }
 
+/** 폼에서 문안을 읽는다. 텍스트 대안 생성은 saveContent 가 한 곳에서 한다. */
+function readContent(form: FormData): B.ContentInput {
+  return {
+    subject: String(form.get("subject") ?? "").trim() || null,
+    body: String(form.get("body") ?? ""),
+    html: String(form.get("html") ?? "").trim() || null,
+    isAd: form.get("isAd") === "1",
+    trackOpens: form.get("trackOpens") === "1",
+    trackClicks: form.get("trackClicks") === "1",
+  };
+}
+
 /** 3단계 — 문안 저장. */
 export async function saveContent(form: FormData): Promise<void> {
   const id = String(form.get("id") ?? "");
-  const body = String(form.get("body") ?? "");
-  const subject = String(form.get("subject") ?? "").trim() || null;
-  const isAd = form.get("isAd") === "1";
-  if (!body.trim()) go(id, 3, "본문을 입력하세요.", "err");
-  await B.saveContent(id, subject, body, isAd);
+  const c = readContent(form);
+  if (!c.body.trim() && !c.html?.trim()) go(id, 3, "본문을 입력하세요.", "err");
+  await B.saveContent(id, c);
+  const isAd = c.isAd;
   go(id, 3, isAd
     ? "저장했습니다. (광고) 표기와 수신거부 안내가 붙습니다."
     : "저장했습니다. 광고성 정보가 아니라고 표시했으므로 (광고) 표기를 붙이지 않습니다 — 판단은 형 책임입니다.");
@@ -96,9 +107,8 @@ export async function testSend(form: FormData): Promise<void> {
   if (!to) go(id, 3, "테스트로 받을 주소를 입력하세요.", "err");
 
   // 저장하지 않은 문안으로 테스트하면 "보낸 것과 다른 것" 을 보게 된다.
-  const body = String(form.get("body") ?? "");
-  const subject = String(form.get("subject") ?? "").trim() || null;
-  if (body.trim()) await B.saveContent(id, subject, body, form.get("isAd") === "1");
+  const c = readContent(form);
+  if (c.body.trim() || c.html?.trim()) await B.saveContent(id, c);
 
   const r = await B.sendTest(id, to);
   go(id, 3, r.detail, r.ok ? "ok" : "err");

@@ -1049,7 +1049,7 @@ test("자동 발송이 아닌 채널은 메일을 보내지 않고 작업 큐로
   // 지역 변수 이름을 n 으로 두면 모듈 상단의 카운트 헬퍼 n() 을 가린다.
   const targets = await B.materialize(id);
   if (targets === 0) return;
-  await B.saveContent(id, null, "{{name}} 님, 제안드립니다.", true);
+  await B.saveContent(id, { subject: null, body: "{{name}} 님, 제안드립니다.", html: null, isAd: true, trackOpens: false, trackClicks: false });
 
   const msgBefore = await n("message");
   const r = await B.sendChunk(id, 10);
@@ -1085,7 +1085,7 @@ test("법정 표기가 비면 발송을 막는다", async () => {
   const id = await B.createBlast("표기 점검", "email", JAY);
   await B.saveFilters(id, { limit: 1 }, "main@diboutique.com");
   await B.materialize(id);
-  await B.saveContent(id, "제안드립니다", "안녕하세요 {{name}} 님.", true);
+  await B.saveContent(id, { subject: "제안드립니다", body: "안녕하세요 {{name}} 님.", html: null, isAd: true, trackOpens: false, trackClicks: false });
 
   // 사업장 주소·연락처를 비운다.
   await run(`DELETE FROM app_setting WHERE key IN ('mail.postal','mail.phone')`);
@@ -1190,4 +1190,116 @@ test("발신 표시명은 법정 조직명과 따로 둔다", async () => {
   await S.save({ "mail.from_name": "디노스튜디오 파트너십" }, JAY);
   assert.equal(await S.fromName(), "디노스튜디오 파트너십");
   assert.equal(await S.get("mail.org"), "Dinostudio (주)", "법정 조직명은 그대로여야 한다");
+});
+
+// ---------- HTML 본문 · 열람/클릭 추적 ----------
+
+test("HTML 본문은 텍스트와 함께 나가고, 추적은 켤 때만 붙는다", async () => {
+  const B = await import("../src/lib/blast.ts");
+  const G = await import("../src/lib/channels/gmail.ts");
+  const S = await import("../src/lib/settings.ts");
+  await S.save({ "app.base_url": "https://www.diboutique.com", "mail.domain": "diboutique.com",
+                 "mail.postal": "서울시 성동구", "mail.phone": "02-1234-5678" }, JAY);
+
+  const id = await B.createBlast("HTML 발송", "email", JAY);
+  await B.saveFilters(id, { limit: 1 }, "main@diboutique.com");
+  await B.materialize(id);
+  await B.saveContent(id, {
+    subject: "{{name}} 님께",
+    body: "",   // 비워 두면 HTML 에서 자동 생성
+    html: '<p>안녕하세요 {{name}} 님</p><p><img src="https://cdn.example.com/b.jpg" alt="배너" /></p>'
+        + '<p><a href="https://shop.example.com/deal">상세 보기</a></p>',
+    isAd: true, trackOpens: false, trackClicks: false,
+  });
+
+  // 추적을 껐으면 링크가 그대로여야 한다.
+  let f = (await B.previewFinal(id))!;
+  assert.ok(f.html, "HTML 이 나와야 한다");
+  assert.match(f.html!, /shop\.example\.com\/deal/, "추적을 껐는데 링크가 바뀌었다");
+  assert.doesNotMatch(f.html!, /\/t\/o\//, "추적을 껐는데 픽셀이 붙었다");
+  // (광고) 표기와 수신거부는 HTML 에도 있어야 한다 — 텍스트에만 있으면 반쪽이다.
+  assert.match(f.subject ?? "", /^\(광고\)/);
+  assert.match(f.html!, /수신거부/);
+
+  // 텍스트 대안이 자동 생성됐고 이미지 alt·링크 주소가 남아 있다.
+  const text = G.htmlToText(f.html!);
+  assert.match(text, /\[배너\]/, "이미지 alt 가 텍스트에 남아야 한다");
+  assert.match(text, /상세 보기 \(https:\/\/shop\.example\.com\/deal\)/, "링크 주소가 남아야 한다");
+
+  // 켜면 링크가 치환되고 픽셀이 붙는다.
+  await B.saveContent(id, {
+    subject: "{{name}} 님께", body: "",
+    html: '<p><a href="https://shop.example.com/deal">상세 보기</a></p>',
+    isAd: true, trackOpens: true, trackClicks: true,
+  });
+  const links: string[] = [];
+  const b2 = (await B.getBlast(id))!;
+  f = await B.applyTracking(b2, (await B.previewFinal(id))!, "tok123", "https://www.diboutique.com", links);
+  assert.match(f.html!, /\/t\/c\/tok123\/0/, "클릭 링크로 치환되지 않았다");
+  assert.match(f.html!, /\/t\/o\/tok123/, "열람 픽셀이 붙지 않았다");
+  assert.deepEqual(links, ["https://shop.example.com/deal"]);
+
+  // 수신거부 링크는 추적하지 않는다 — 해지를 눌렀는지가 우리 분석 데이터가 될 이유가 없다.
+  assert.doesNotMatch(
+    f.html!.match(/href="[^"]*\/u\/[^"]*"/)?.[0] ?? 'href="/u/x"', /\/t\/c\//,
+    "수신거부 링크가 추적을 거치고 있다");
+
+  // MIME 이 multipart/alternative 로 나가고 두 파트가 다 있어야 한다.
+  const raw = G.buildRaw({
+    from: "main@diboutique.com", to: "x@naver.com",
+    subject: f.subject, body: G.htmlToText(f.html!), html: f.html,
+  }, new Date("2026-09-07T04:00:00Z"), "BND");
+  const mime = Buffer.from(raw, "base64url").toString("utf8");
+  assert.match(mime, /Content-Type: multipart\/alternative; boundary="BND"/);
+  assert.match(mime, /--BND\r\nContent-Type: text\/plain/, "text/plain 파트가 먼저여야 한다");
+  assert.match(mime, /--BND\r\nContent-Type: text\/html/);
+  assert.match(mime, /--BND--/, "닫는 boundary 가 없다");
+});
+
+test("클릭 추적은 우리가 넣은 주소로만 보낸다", async () => {
+  // 열린 리다이렉터를 만들면 우리 도메인의 신뢰를 빌려 피싱에 쓰인다.
+  // 대상 주소를 파라미터로 받지 않고 blast_link 의 번호로만 가리킨다.
+  const T = await import("../src/lib/tracking.ts");
+  const B = await import("../src/lib/blast.ts");
+
+  const id = await B.createBlast("리다이렉트 점검", "email", JAY);
+  await T.saveLinks(id, ["https://shop.example.com/deal"]);
+
+  const msgId = (await one<{ id: string }>(
+    `INSERT INTO message (campaign_member_id, channel, direction, blast_id, body, track_token)
+     SELECT id, 'email', 'out', $1, '본문', 'tok_open_redirect'
+       FROM campaign_member LIMIT 1 RETURNING id`, [id]))!.id;
+  assert.ok(msgId);
+
+  const hit = await T.recordClick("tok_open_redirect", 0, "test-ua");
+  assert.equal(hit?.url, "https://shop.example.com/deal");
+
+  // 없는 번호는 아무 데도 보내지 않는다.
+  assert.equal(await T.recordClick("tok_open_redirect", 99, null), null);
+  assert.equal(await T.recordClick("없는토큰", 0, null), null);
+
+  // 열람도 토큰이 맞아야만 기록된다.
+  assert.equal(await T.recordOpen("없는토큰", null), null);
+  assert.ok(await T.recordOpen("tok_open_redirect", "test-ua"));
+
+  // 링크별 집계: 누른 사람이 클릭 횟수를 넘으면 안 된다. 발송 대상 전원을
+  // 세는 실수가 있었다 — 클릭 2회에 누른 사람 3명이 나왔다.
+  const stats = await T.linkStats(id);
+  const dealLink = stats.find((x) => x.url === "https://shop.example.com/deal")!;
+  assert.equal(dealLink.clicks, 1);
+  assert.equal(dealLink.people, 1);
+  for (const x of stats) {
+    assert.ok(x.people <= x.clicks, `${x.url}: 사람 ${x.people} > 클릭 ${x.clicks}`);
+  }
+
+  const s = await T.summary(id);
+  assert.equal(s.clickEvents, 1);
+  assert.equal(s.openEvents, 1);
+  assert.equal(s.opened, 1, "열람한 사람은 1명");
+
+  // 같은 사람이 또 열면 횟수만 늘고 사람 수는 그대로다.
+  await T.recordOpen("tok_open_redirect", "test-ua");
+  const s2 = await T.summary(id);
+  assert.equal(s2.openEvents, 2);
+  assert.equal(s2.opened, 1, "사람 수와 횟수를 섞으면 열람률이 100%를 넘는다");
 });

@@ -57,6 +57,8 @@ export interface OutboundMessage {
   threadKey?: string | null;
   inReplyTo?: string | null;
   references?: string | null;
+  /** HTML 본문. 있으면 multipart/alternative 로 text/plain 과 함께 싣는다. */
+  html?: string | null;
 }
 
 /**
@@ -102,8 +104,24 @@ function rfc5322Date(d = new Date()): string {
   return d.toUTCString().replace("GMT", "+0000");
 }
 
-/** RFC 5322 조립. */
-export function buildRaw(msg: OutboundMessage, now = new Date()): string {
+/** 본문 한 조각. 줄바꿈을 CRLF 로 정규화하고 base64 를 76자로 접는다. */
+function part(mime: string, text: string): string[] {
+  return [
+    `Content-Type: ${mime}; charset="UTF-8"`,
+    "Content-Transfer-Encoding: base64",
+    "",
+    foldBase64(b64(text.replace(/\r?\n/g, "\r\n"))),
+  ];
+}
+
+/**
+ * RFC 5322 조립.
+ *
+ * HTML 이 있으면 multipart/alternative 로 text/plain 과 함께 싣는다. HTML 만
+ * 보내면 텍스트만 읽는 클라이언트에서 빈 메일이 되고, 필터도 그걸 점수에 넣는다.
+ * 순서는 규격대로 "덜 좋은 것 먼저" — text/plain 다음에 text/html 이다.
+ */
+export function buildRaw(msg: OutboundMessage, now = new Date(), boundary?: string): string {
   const lines: string[] = [];
   lines.push(`From: ${msg.fromName ? `${encodeWords(msg.fromName)} ` : ""}<${msg.from}>`);
   lines.push(`To: ${msg.to}`);
@@ -114,13 +132,48 @@ export function buildRaw(msg: OutboundMessage, now = new Date()): string {
   if (msg.references) lines.push(`References: ${msg.references}`);
   for (const [k, v] of Object.entries(msg.headers ?? {})) lines.push(`${k}: ${v}`);
   lines.push("MIME-Version: 1.0");
-  lines.push('Content-Type: text/plain; charset="UTF-8"');
-  lines.push("Content-Transfer-Encoding: base64");
-  lines.push("");
-  // 본문 줄바꿈도 CRLF 여야 한다. text/plain 의 정규 형식이 그렇고, LF 만
-  // 들어가면 일부 수신 서버가 본문을 한 줄로 붙여 버린다.
-  lines.push(foldBase64(b64(msg.body.replace(/\r?\n/g, "\r\n"))));
+
+  if (msg.html?.trim()) {
+    const bd = boundary ?? `b_${crypto.randomBytes(12).toString("hex")}`;
+    lines.push(`Content-Type: multipart/alternative; boundary="${bd}"`);
+    lines.push("");
+    lines.push(`--${bd}`);
+    lines.push(...part("text/plain", msg.body));
+    lines.push(`--${bd}`);
+    lines.push(...part("text/html", msg.html));
+    lines.push(`--${bd}--`);
+  } else {
+    lines.push(...part("text/plain", msg.body));
+  }
+
   return Buffer.from(lines.join("\r\n")).toString("base64url");
+}
+
+/**
+ * HTML 에서 text/plain 대안을 만든다.
+ *
+ * 사람이 두 벌을 따로 쓰게 하면 한쪽이 반드시 낡는다. 링크는 텍스트 뒤에
+ * 주소를 붙여 남긴다 — 텍스트만 보는 사람에게 링크가 사라지면 안 된다.
+ */
+export function htmlToText(html: string): string {
+  return html
+    .replace(/<style[\s\S]*?<\/style>/gi, "")
+    .replace(/<script[\s\S]*?<\/script>/gi, "")
+    .replace(/<br\s*\/?>/gi, "\n")
+    .replace(/<\/(p|div|h[1-6]|li|tr)>/gi, "\n")
+    .replace(/<li[^>]*>/gi, "· ")
+    .replace(/<a\b[^>]*href=["']([^"']+)["'][^>]*>([\s\S]*?)<\/a>/gi,
+      (_, href, text) => {
+        const t = String(text).replace(/<[^>]+>/g, "").trim();
+        return t && !t.includes(href) ? `${t} (${href})` : href;
+      })
+    .replace(/<img\b[^>]*alt=["']([^"']*)["'][^>]*>/gi, (_, alt) => (alt ? `[${alt}]` : ""))
+    .replace(/<[^>]+>/g, "")
+    .replace(/&nbsp;/g, " ").replace(/&amp;/g, "&").replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">").replace(/&quot;/g, '"').replace(/&#39;/g, "'")
+    .replace(/[ \t]+\n/g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 export interface SendResult {

@@ -4,6 +4,7 @@ import Shell from "@/components/Shell";
 import { Card, Empty, IgLink, Note, Pill, Scroller } from "@/components/ui";
 import { fmt, fol } from "@/lib/format";
 import * as B from "@/lib/blast";
+import * as track from "@/lib/tracking";
 import SendRunner from "./SendRunner";
 import { confirmTargets, goStep, saveContent, saveTargets, testSend } from "../actions";
 
@@ -45,6 +46,9 @@ export default async function BlastPage({
   // 4단계는 "실제로 나가는 그대로" 를 보여준다 — 법정 표기까지 붙은 상태로.
   const final = step === 4 ? await B.previewFinal(id) : null;
   const pre = step === 4 ? await B.preflight(id) : null;
+  const [tr, links, people] = step === 5
+    ? await Promise.all([track.summary(id), track.linkStats(id), track.engaged(id)])
+    : [null, [], []];
 
   const f = b.filters ?? {};
 
@@ -203,9 +207,22 @@ export default async function BlastPage({
                     </label>
                   )}
                   <label className="field" style={{ marginTop: 10 }}>
-                    <span>본문</span>
-                    <textarea name="body" rows={14} defaultValue={b.body ?? ""}
+                    <span>본문 (텍스트)</span>
+                    <textarea name="body" rows={10} defaultValue={b.body ?? ""}
                               placeholder={"안녕하세요 {{name}} 님,\n\n{{org}} 입니다.\n\n…"} />
+                    <small style={{ color: "var(--ink-3)", fontSize: 11 }}>
+                      비워 두고 아래 HTML 만 쓰면 텍스트 버전을 자동으로 만들어 줍니다.
+                    </small>
+                  </label>
+
+                  <label className="field" style={{ marginTop: 12 }}>
+                    <span>본문 (HTML · 이미지)</span>
+                    <textarea name="html" rows={12} defaultValue={b.body_html ?? ""}
+                              placeholder={'<p>안녕하세요 {{name}} 님,</p>\n<p><img src="https://…/banner.jpg" alt="9월 리빙 공구" width="560" /></p>\n<p><a href="https://…">상세 보기</a></p>'} />
+                    <small style={{ color: "var(--ink-3)", fontSize: 11 }}>
+                      채우면 HTML 과 텍스트를 함께 보냅니다 (multipart/alternative). 이미지는{" "}
+                      <code className="mono">&lt;img src=&quot;https://…&quot;&gt;</code> 로 넣으세요.
+                    </small>
                   </label>
                   <div className="foot">
                     <button className="btn pri" type="submit">문안 저장</button>
@@ -213,6 +230,54 @@ export default async function BlastPage({
                       치환 변수: {B.VARS.map((v) => `{{${v.key}}} ${v.label}`).join(" · ")}
                     </span>
                   </div>
+                </div>
+              </Card>
+
+              <Card title="이미지 넣는 법" hint="첨부·base64 대신 링크로">
+                <div className="card-b">
+                  <Note tone="warn">
+                    <b>이미지를 메일에 끼워 넣지 마세요.</b> base64 로 본문에 박거나 첨부로 붙이면 용량이
+                    커지고 스팸 판정이 크게 나빠집니다. 이미지는 <b>어딘가에 올려 두고 주소로 참조</b>하는
+                    것이 표준입니다 — 위 HTML 칸에{" "}
+                    <code className="mono">&lt;img src=&quot;https://…&quot; width=&quot;560&quot; alt=&quot;설명&quot;&gt;</code>.
+                    <br /><br />
+                    올릴 곳이 없으면 인스타 게시물 이미지 주소나 브랜드가 준 상세페이지 이미지를 쓰면
+                    됩니다. <b>alt 는 반드시 넣으세요</b> — 대다수 메일 클라이언트가 이미지를 기본
+                    차단하므로, alt 가 없으면 받는 사람에게 빈 사각형만 보입니다. 텍스트 본문만으로도
+                    말이 되게 쓰는 것이 안전합니다.
+                  </Note>
+                </div>
+              </Card>
+
+              <Card title="열람 · 클릭 추적" hint="켜면 도달률이 떨어집니다">
+                <div className="card-b">
+                  <div className="chips" style={{ marginBottom: 10, gap: 18 }}>
+                    <label className="chk">
+                      <input type="checkbox" name="trackOpens" value="1" defaultChecked={b.track_opens} />
+                      <span>열람 추적 (1x1 픽셀)</span>
+                    </label>
+                    <label className="chk">
+                      <input type="checkbox" name="trackClicks" value="1" defaultChecked={b.track_clicks} />
+                      <span>클릭 추적 (링크 치환)</span>
+                    </label>
+                  </div>
+                  <Note tone="warn">
+                    <b>둘 다 기본 꺼짐입니다. 켜면 스팸 판정이 나빠집니다.</b>
+                    <ul style={{ margin: "8px 0 0", paddingLeft: 18, lineHeight: 1.9 }}>
+                      <li>
+                        <b>열람 추적</b>은 1x1 투명 이미지를 숨겨 넣는 방식이라 필터가 싫어합니다. Gmail 은
+                        이미지를 자기 프록시로 받아 캐시하므로 수치가 부풀고, 이미지 차단 설정에서는 아예
+                        잡히지 않습니다 — <b>정확한 값이 아니라 방향만 보는 지표</b>입니다.
+                      </li>
+                      <li>
+                        <b>클릭 추적</b>은 링크를 우리 도메인으로 바꿔치기하므로, 원 도메인의 평판 대신 갓
+                        만든 우리 도메인 평판이 걸립니다. 대신 열람보다 훨씬 정확합니다.
+                      </li>
+                    </ul>
+                    <br />
+                    첫 몇 번은 둘 다 끄고 도달률부터 확보하시고, 안정되면 <b>클릭만</b> 켜는 순서를
+                    권합니다. HTML 본문이 없으면 둘 다 동작하지 않습니다 (텍스트 메일에는 넣을 자리가 없습니다).
+                  </Note>
                 </div>
               </Card>
 
@@ -283,6 +348,19 @@ export default async function BlastPage({
                   <dt>제목</dt><dd>{final?.subject ?? b.subject ?? "—"}</dd>
                 </dl>
                 <pre className="mono preview">{final?.body ?? b.body}</pre>
+                {final?.html && (
+                  <>
+                    <div className="kv" style={{ marginTop: 14, gridTemplateColumns: "104px 1fr" }}>
+                      <dt>HTML</dt>
+                      <dd>
+                        보냅니다 (multipart/alternative)
+                        {b.track_opens && " · 열람 추적 켜짐"}
+                        {b.track_clicks && " · 클릭 추적 켜짐"}
+                      </dd>
+                    </div>
+                    <pre className="mono preview" style={{ maxHeight: 220 }}>{final.html}</pre>
+                  </>
+                )}
                 {ch.auto && (
                   <Note>
                     <b>(광고) 표기와 수신거부 안내는 자동으로 붙습니다</b> — 정보통신망법 §50 이고, 빼면
@@ -356,6 +434,71 @@ export default async function BlastPage({
                 )}
               </div>
             </Card>
+
+            {(b.track_opens || b.track_clicks) && tr && (
+              <Card title="열람 · 클릭" hint={`발송 ${fmt(tr.sent)}건 기준`}>
+                <div className="card-b">
+                  <div className="kpis">
+                    {[
+                      ["열람한 사람", tr.opened, tr.sent ? `${Math.round((tr.opened / tr.sent) * 100)}%` : null],
+                      ["열람 횟수", tr.openEvents, null],
+                      ["클릭한 사람", tr.clicked, tr.sent ? `${Math.round((tr.clicked / tr.sent) * 100)}%` : null],
+                      ["클릭 횟수", tr.clickEvents, null],
+                    ].map(([label, n, pct]) => (
+                      <div className="kpi" key={String(label)}>
+                        <span>{label}</span>
+                        <b className="mono">{fmt(n as number)}</b>
+                        {pct ? <em>{pct as string}</em> : null}
+                      </div>
+                    ))}
+                  </div>
+                  <Note>
+                    열람 수는 <b>정확한 값이 아닙니다</b> — Gmail 이 이미지를 프록시로 캐시하면 부풀고,
+                    이미지 차단 설정에서는 열어도 잡히지 않습니다. 클릭이 훨씬 믿을 만한 신호입니다.
+                  </Note>
+                </div>
+              </Card>
+            )}
+
+            {links.length > 0 && (
+              <Card title="링크별 클릭" hint="무엇을 눌렀는지가 열람률보다 쓸모 있습니다">
+                <Scroller wide>
+                  <table>
+                    <thead><tr><th>링크</th><th>클릭 수</th><th>누른 사람</th></tr></thead>
+                    <tbody>
+                      {links.map((l) => (
+                        <tr key={l.url}>
+                          <td className="mono" style={{ fontSize: 11 }}>{l.url}</td>
+                          <td className="num">{fmt(l.clicks)}</td>
+                          <td className="num">{fmt(l.people)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </Scroller>
+              </Card>
+            )}
+
+            {people.length > 0 && (
+              <Card title="반응한 대상" hint="회신이 없어도 관심 있는 사람을 골라낼 수 있습니다">
+                <Scroller wide>
+                  <table>
+                    <thead><tr><th>크리에이터</th><th>열람</th><th>클릭</th><th>첫 열람</th><th>마지막 클릭</th></tr></thead>
+                    <tbody>
+                      {people.map((x) => (
+                        <tr key={x.handle}>
+                          <td><IgLink handle={x.handle}><b>@{x.handle}</b></IgLink></td>
+                          <td className="num">{fmt(x.opens)}</td>
+                          <td className="num">{x.clicks > 0 ? <b style={{ color: "var(--ok)" }}>{fmt(x.clicks)}</b> : "—"}</td>
+                          <td className="num">{x.first_open ?? "—"}</td>
+                          <td className="num">{x.last_click ?? "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </Scroller>
+              </Card>
+            )}
 
             <Card title="회신 확인" hint="회신은 통합 인박스로 자동 매핑됩니다">
               <div className="card-b">

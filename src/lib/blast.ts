@@ -3,8 +3,10 @@ import { ENGINE } from "./states";
 import { CATEGORY_KEYS } from "./score";
 import { defaultMailbox, isConfigured as isSaConfigured, mailboxes } from "./google-sa";
 import { gmail } from "./channels";
+import { htmlToText } from "./channels/gmail";
 import * as settings from "./settings";
 import { hasTable } from "./schema";
+import * as track from "./tracking";
 import { render, type PolicyRow } from "./template";
 import { channelPolicies } from "./queries";
 
@@ -236,6 +238,10 @@ export interface Blast {
   mailbox_email: string | null;
   subject: string | null;
   body: string | null;
+  /** HTML 본문. 있으면 multipart/alternative 로 나간다 — 이미지가 여기 들어간다. */
+  body_html: string | null;
+  track_opens: boolean;
+  track_clicks: boolean;
   filters: Filters;
   /** 영리목적 광고성 정보인가. (광고) 표기와 수신거부 푸터가 여기에 달려 있다. */
   is_ad: boolean;
@@ -248,7 +254,8 @@ export interface Blast {
 export async function getBlast(id: string): Promise<Blast | null> {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return null;
   return (await one<Blast>(
-    `SELECT id, name, channel, campaign_id, mailbox_email, subject, body, filters, is_ad, state,
+    `SELECT id, name, channel, campaign_id, mailbox_email, subject, body, body_html,
+            track_opens, track_clicks, filters, is_ad, state,
             target_count, to_char(created_at,'MM-DD HH24:MI') AS created_at,
             to_char(sent_at,'MM-DD HH24:MI') AS sent_at
        FROM blast WHERE id=$1`, [id])) ?? null;
@@ -281,12 +288,29 @@ export async function saveFilters(id: string, f: Filters, mailbox: string | null
     [id, JSON.stringify(f), mailbox]);
 }
 
-export async function saveContent(
-  id: string, subject: string | null, body: string, isAd: boolean,
-): Promise<void> {
+export interface ContentInput {
+  subject: string | null;
+  body: string;
+  html: string | null;
+  isAd: boolean;
+  trackOpens: boolean;
+  trackClicks: boolean;
+}
+
+/**
+ * 문안 저장.
+ *
+ * text/plain 은 항상 있어야 한다. HTML 만 쓴 경우 여기서 대안을 만든다 —
+ * 부르는 쪽마다 만들게 하면 한 곳이 빠지고, 그러면 "본문이 비어 있다" 로
+ * 발송이 막히거나 텍스트 클라이언트에서 빈 메일이 된다.
+ */
+export async function saveContent(id: string, c: ContentInput): Promise<void> {
+  const html = c.html?.trim() || null;
+  const body = c.body.trim() ? c.body : html ? htmlToText(html) : "";
   await run(
-    `UPDATE blast SET subject=$2, body=$3, is_ad=$4, updated_at=now() WHERE id=$1`,
-    [id, subject, body, isAd]);
+    `UPDATE blast SET subject=$2, body=$3, body_html=$4, is_ad=$5,
+            track_opens=$6, track_clicks=$7, updated_at=now() WHERE id=$1`,
+    [id, c.subject, body, html, c.isAd, c.trackOpens, c.trackClicks]);
 }
 
 /** 치환 변수. 문안 화면이 그대로 안내한다. */
@@ -315,6 +339,8 @@ export function fillVars(body: string, v: Record<string, string>): string {
 export interface RenderedBlast {
   subject: string | null;
   body: string;
+  /** HTML 본문. 추적을 켜면 링크가 치환되고 픽셀이 붙은 상태다. */
+  html: string | null;
   headers: Record<string, string>;
   warnings: string[];
 }
@@ -332,17 +358,56 @@ export async function renderForSend(
   const [local, domain] = address.split("@");
   const bare = replyToken ? gmail.bareToken(replyToken) : null;
 
-  return render(
+  const sender = {
+    orgName: org, address, phone, postalAddress: postal,
+    unsubUrl: bare ? `${unsubBase}/${bare}` : undefined,
+    unsubMailto: bare ? `${local}+unsub_${bare}@${domain}` : undefined,
+    displayName: org,
+  };
+
+  const text = render(
     { subject: b.subject, body: b.body ?? "", is_ad_content: b.is_ad, channel: b.channel },
-    vars,
-    policy,
-    {
-      orgName: org, address, phone, postalAddress: postal,
-      unsubUrl: bare ? `${unsubBase}/${bare}` : undefined,
-      unsubMailto: bare ? `${local}+unsub_${bare}@${domain}` : undefined,
-      displayName: org,
-    },
-  );
+    vars, policy, sender);
+
+  if (!b.body_html?.trim()) return { ...text, html: null };
+
+  // HTML 도 같은 렌더러를 거친다 — (광고) 표기와 수신거부가 HTML 쪽에만 빠지면
+  // 텍스트로 읽는 사람에게만 표기가 보인다.
+  const htmlRendered = render(
+    { subject: b.subject, body: fillVars(b.body_html, vars), is_ad_content: b.is_ad, channel: b.channel },
+    {}, policy, sender);
+
+  // 푸터는 render 가 평문으로 붙인다. HTML 안에서는 줄바꿈이 무시되므로 옮겨 준다.
+  const [htmlBody, ...footer] = htmlRendered.body.split("\n\n—\n");
+  const html = footer.length
+    ? `${htmlBody}\n<hr style="border:0;border-top:1px solid #ddd;margin:24px 0" />\n` +
+      `<div style="font-size:12px;color:#666;line-height:1.7">` +
+      footer.join("\n").split("\n").map((l) => escapeHtml(l)).join("<br />") +
+      `</div>`
+    : htmlBody;
+
+  return { ...text, html, warnings: [...text.warnings, ...htmlRendered.warnings] };
+}
+
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+/**
+ * 추적을 붙인다. 링크를 우리 도메인으로 바꾸고 열람 픽셀을 넣는다.
+ *
+ * 발송마다 켜고 끈다 — 켜면 도달률이 떨어진다(tracking.ts). 텍스트 본문은
+ * 건드리지 않는다: 평문에서 링크를 바꿔치기하면 받는 사람이 눈으로 목적지를
+ * 확인할 수 없다.
+ */
+export async function applyTracking(
+  b: Blast, r: RenderedBlast, token: string, baseUrl: string, links: string[],
+): Promise<RenderedBlast> {
+  if (!r.html || (!b.track_opens && !b.track_clicks)) return r;
+  let html = r.html;
+  if (b.track_clicks) html = track.rewriteLinks(html, links, baseUrl, token);
+  if (b.track_opens) html += track.pixelTag(baseUrl, token);
+  return { ...r, html };
 }
 
 /**
@@ -397,6 +462,7 @@ export async function sendTest(blastId: string, to: string): Promise<{ ok: boole
       from, fromName: display, to,
       subject: `[테스트] ${r.subject ?? b.name}`,
       body,
+      html: r.html,
       headers: r.headers,
     });
     await settings.testLog("send", !res.dryRun, { detail: `발송 테스트 · ${b.name}` }, null, to);
@@ -464,6 +530,10 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
   const from = b.mailbox_email ?? (await defaultMailbox());
   const policy = await policyFor(b.channel, b.is_ad);
   const display = await settings.fromName();
+  const baseUrl = (await settings.get("app.base_url")).replace(/\/$/, "");
+  // 링크 번호는 발송 전체에서 같아야 한다 — 이미 담아 둔 것을 이어서 쓴다.
+  const links = (await all<{ url: string }>(
+    `SELECT url FROM blast_link WHERE blast_id=$1 ORDER BY idx`, [blastId])).map((x) => x.url);
 
   let sent = 0, queued = 0, blocked = 0;
   for (const r of rows) {
@@ -474,9 +544,11 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
       org,
     };
     // 렌더러가 (광고) 표기와 수신거부를 붙인다. 본문을 그대로 보내면 안 된다.
-    const r0 = await renderForSend(b, vars, r.reply_token, policy);
-    const body = r0.body;
-    const subject = r0.subject ?? b.name;
+    const trackToken = track.newTrackToken();
+    const rendered = await applyTracking(
+      b, await renderForSend(b, vars, r.reply_token, policy), trackToken, baseUrl, links);
+    const body = rendered.body;
+    const subject = rendered.subject ?? b.name;
 
     if (!ch.auto) {
       // 사람이 붙여넣는 채널. 문안과 링크를 큐에 넣는다.
@@ -496,14 +568,15 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
       const res = await gmail.send({
         from: from!, fromName: display, to: r.contact,
         replyTo: r.reply_token ? gmail.replyToAddress(base, r.reply_token) : null,
-        subject, body, headers: r0.headers,
+        subject, body, html: rendered.html, headers: rendered.headers,
       });
       await run(
         `INSERT INTO message (campaign_member_id, contact_point_id, channel, direction, blast_id,
-                              thread_key, provider_msg_id, subject, body, status)
-         VALUES ($1,$2,$3,'out',$4,$5,$6,$7,$8,$9)`,
+                              thread_key, provider_msg_id, subject, body, status, track_token)
+         VALUES ($1,$2,$3,'out',$4,$5,$6,$7,$8,$9,$10)`,
         [r.member_id, r.contact_id, b.channel, blastId, res.threadKey, res.providerMessageId,
-         subject, body, res.dryRun ? "dry_run" : "sent"]);
+         subject, body, res.dryRun ? "dry_run" : "sent",
+         b.track_opens || b.track_clicks ? trackToken : null]);
       await run(
         `UPDATE campaign_member
             SET last_sent_at=now(), first_sent_at=COALESCE(first_sent_at, now()),
@@ -515,6 +588,10 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
       blocked++;
     }
   }
+
+  // 본문에서 찾은 링크를 담아 둔다. /t/c 는 이 표만 보고 리다이렉트하므로
+  // 여기 없는 주소로는 어디로도 보낼 수 없다.
+  if (b.track_clicks && links.length) await track.saveLinks(blastId, links);
 
   const remaining = (await one<{ n: number }>(
     `SELECT count(*)::int AS n FROM campaign_member m
