@@ -979,3 +979,95 @@ test("기본 발신함은 언제나 하나다", async () => {
   await sa.setEnabled("team@diboutique.com", false);
   assert.equal(await sa.defaultMailbox(), null);
 });
+
+// ---------- 발송 (blast) ----------
+
+test("발송은 필터·확정·발송이 같은 조건을 본다", async () => {
+  // 카운트와 실제 발송이 조건을 따로 쓰면 "1,200명" 이라고 띄워 놓고 900명에게
+  // 나간다. 그 차이는 아무 표시도 없이 생긴다 — 한 곳에서만 조건을 만든다.
+  const B = await import("../src/lib/blast.ts");
+  await run(`DELETE FROM blast`);
+
+  const wide = await B.countTargets("email", {});
+  assert.ok(wide > 0, "이메일로 닿을 수 있는 대상이 있어야 한다");
+
+  // 필터는 좁히기만 한다.
+  const narrow = await B.countTargets("email", { minFollowers: 100000 });
+  assert.ok(narrow <= wide, "필터가 대상을 늘리면 안 된다");
+
+  const id = await B.createBlast("테스트 발송", "email", JAY);
+  await B.saveFilters(id, { minFollowers: 100000, limit: 3 }, null);
+
+  const n = await B.materialize(id);
+  assert.equal(n, Math.min(3, narrow), "limit 을 넘겨 담으면 안 된다");
+
+  const b = await B.getBlast(id);
+  assert.equal(b!.state, "targeted");
+  assert.equal(b!.target_count, n);
+
+  // 두 번 확정해도 늘어나지 않는다 — 같은 대상을 두 번 담으면 두 번 보낸다.
+  assert.equal(await B.materialize(id), n, "재확정이 대상을 중복 추가하면 안 된다");
+});
+
+test("수신거부 대상은 어떤 필터에서도 빠진다", async () => {
+  const B = await import("../src/lib/blast.ts");
+  const before = await B.countTargets("email", {});
+
+  // 이메일로 닿는 대상 하나를 연락 금지로 등재한다.
+  const victim = await one<{ id: string; handle: string }>(
+    `SELECT c.id, sa.handle FROM creator c
+       JOIN social_account sa ON sa.creator_id=c.id AND sa.platform='instagram'
+      WHERE c.merged_into IS NULL
+        AND EXISTS (SELECT 1 FROM contact_point x WHERE x.creator_id=c.id AND x.channel='email'
+                     AND x.consent_status <> 'opt_out')
+        AND NOT EXISTS (SELECT 1 FROM suppression s WHERE s.identifier_val = c.id::text)
+      ORDER BY c.id LIMIT 1`);
+  assert.ok(victim, "대상이 있어야 한다");
+
+  await run(
+    `INSERT INTO suppression (identifier_type, identifier_val, channels, reason)
+     VALUES ('creator_id',$1,'{}','manual') ON CONFLICT DO NOTHING`, [victim!.id]);
+  try {
+    assert.equal(await B.countTargets("email", {}), before - 1, "등재 즉시 대상에서 빠져야 한다");
+  } finally {
+    await run(`DELETE FROM suppression WHERE identifier_val=$1 AND reason='manual'`, [victim!.id]);
+  }
+});
+
+test("자동 발송이 아닌 채널은 메일을 보내지 않고 작업 큐로 간다", async () => {
+  // 인스타 DM 은 임의의 핸들에 첫 DM 을 보내는 API 가 없고, 인포크·인링크는
+  // 상대의 폼에 사람이 붙여넣는다. 이 채널이 조용히 메일로 나가면 안 된다.
+  const B = await import("../src/lib/blast.ts");
+  assert.equal(B.channelSpec("email").auto, true);
+  for (const k of ["inpock_offer", "inlink_form", "instagram_dm"]) {
+    assert.equal(B.channelSpec(k).auto, false, `${k} 는 자동 발송이 아니다`);
+  }
+  assert.throws(() => B.channelSpec("carrier_pigeon"), /알 수 없는 채널/);
+
+  const id = await B.createBlast("인포크 테스트", "inpock_offer", JAY);
+  await B.saveFilters(id, { limit: 2 }, null);
+  // 지역 변수 이름을 n 으로 두면 모듈 상단의 카운트 헬퍼 n() 을 가린다.
+  const targets = await B.materialize(id);
+  if (targets === 0) return;
+  await B.saveContent(id, null, "{{name}} 님, 제안드립니다.");
+
+  const msgBefore = await n("message");
+  const r = await B.sendChunk(id, 10);
+  assert.equal(r.sent, 0, "작업 큐 채널에서 메일이 나가면 안 된다");
+  assert.ok(r.queued > 0, "작업 큐에 쌓여야 한다");
+  assert.equal(await n("message"), msgBefore, "message 를 남기면 안 된다");
+
+  const task = await one<{ blast_id: string; rendered_body: string }>(
+    `SELECT blast_id, rendered_body FROM outreach_task WHERE blast_id=$1 LIMIT 1`, [id]);
+  assert.ok(task, "작업이 이 발송에 묶여야 한다 — 결과 집계가 이걸로 센다");
+});
+
+test("치환 변수는 실제 값으로 채워지고, 모르는 변수는 지운다", async () => {
+  const B = await import("../src/lib/blast.ts");
+  assert.equal(
+    B.fillVars("{{name}} 님 · @{{handle}} · {{followers}}", { name: "홍길동", handle: "gil", followers: "1,200" }),
+    "홍길동 님 · @gil · 1,200",
+  );
+  // 값이 없는 변수를 그대로 남기면 "{{name}} 님" 이 그대로 발송된다.
+  assert.equal(B.fillVars("{{name}} 님 {{unknown}}", { name: "홍길동" }), "홍길동 님 ");
+});

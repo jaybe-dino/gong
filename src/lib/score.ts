@@ -47,6 +47,9 @@ export const ADJACENT: Record<string, string[]> = {
   반려동물: ["리빙"],
 };
 
+/** 고를 수 있는 카테고리. 화면과 임포터가 같은 목록을 봐야 한다. */
+export const CATEGORY_KEYS = Object.keys(ADJACENT);
+
 export function relatedCategories(category: string): string[] {
   return [category, ...(ADJACENT[category] ?? [])];
 }

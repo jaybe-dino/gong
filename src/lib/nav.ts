@@ -7,13 +7,15 @@ const n = async (sql: string) => Number((await one<{ n: string }>(sql))?.n ?? 0)
 
 /** 사이드바 배지는 실제 행 수다. 하드코딩하지 않는다. */
 export async function navGroups(): Promise<NavGroup[]> {
-  const [deals, events, creators, campaigns, tasks, threads] = await Promise.all([
+  const [deals, events, creators, campaigns, tasks, threads, blasts] = await Promise.all([
     n(`SELECT count(*) AS n FROM deal WHERE status='active'`),
     n(`SELECT count(*) AS n FROM change_event WHERE NOT is_read`),
     n(`SELECT count(*) AS n FROM creator WHERE merged_into IS NULL`),
     n(`SELECT count(*) AS n FROM campaign WHERE status='running'`),
     n(`SELECT count(*) AS n FROM outreach_task WHERE state IN ('queued','claimed')`),
     n(`SELECT count(DISTINCT thread_key) AS n FROM message WHERE thread_key IS NOT NULL AND direction='in'`),
+    // 011 이 밀린 배포에서도 사이드바는 떠야 한다.
+    n(`SELECT count(*) AS n FROM blast WHERE state <> 'done'`).catch(() => 0),
   ]);
   return [
     { title: "개요", items: [{ href: "/plan", label: "설계 개요" }, { href: "/dashboard", label: "대시보드" }] },
@@ -27,9 +29,10 @@ export async function navGroups(): Promise<NavGroup[]> {
       { href: "/import", label: "데이터 임포트" },
     ] },
     { title: "실행", items: [
-      { href: "/campaigns", label: "캠페인", count: campaigns },
-      { href: "/send", label: "제안 발송" },
+      { href: "/blast", label: "발송", count: blasts },
       { href: "/queue", label: "작업 큐", count: tasks },
+      { href: "/campaigns", label: "캠페인 (다단계)", count: campaigns },
+      { href: "/send", label: "발송 진단" },
     ] },
     { title: "커뮤니케이션", items: [{ href: "/inbox", label: "통합 인박스", count: threads }] },
     { title: "설정", items: [

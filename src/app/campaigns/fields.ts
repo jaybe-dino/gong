@@ -1,4 +1,4 @@
-import { ADJACENT } from "@/lib/score";
+import { CATEGORY_KEYS } from "@/lib/score";
 
 /**
  * 폼이 고를 수 있는 값. 서버 액션 파일에 둘 수 없다 — "use server" 는 async 함수만
@@ -8,7 +8,7 @@ import { ADJACENT } from "@/lib/score";
  * 나오는데(score.ADJACENT), 사전에 없는 값을 넣으면 그 20점이 전원 0 이 된다.
  * 화면에는 아무 표시도 없이 순위만 이상해진다.
  */
-export const CATEGORIES = Object.keys(ADJACENT);
+export const CATEGORIES = CATEGORY_KEYS;
 
 export const STATUSES = new Set(["draft", "running", "closed"]);
 

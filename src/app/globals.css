@@ -403,3 +403,33 @@ ul.tight li{margin-bottom:5px}
 .cform .foot{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}
 .cform .foot .btn{cursor:pointer}
 .cform .foot .hint{font-size:11.5px;color:var(--ink-3);flex:1;min-width:180px}
+
+/* 발송 마법사 ------------------------------------------------------- */
+.blast .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.blast .field{display:grid;gap:4px;min-width:0}
+.blast .field.wide,.blast .chk.wide{grid-column:1/-1}
+.blast .field>span,.blast fieldset>span{font-size:11.5px;color:var(--ink-2)}
+.blast fieldset{border:0;padding:0;margin:0;display:grid;gap:6px}
+.blast input:not([type=hidden]):not([type=checkbox]):not([type=radio]),
+.blast select,.blast textarea{font:inherit;font-size:12.5px;padding:6px 9px;border:1px solid var(--line-2);border-radius:var(--r);background:var(--surface);color:var(--ink);min-width:0;width:100%}
+.blast textarea{font-family:"IBM Plex Mono",monospace;font-size:12.5px;line-height:1.7;resize:vertical}
+.blast input:focus,.blast select:focus,.blast textarea:focus{outline:2px solid var(--accent-line);outline-offset:1px;border-color:var(--accent)}
+.blast .foot{display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:14px}
+.blast .foot .hint{font-size:11.5px;color:var(--ink-3);flex:1;min-width:200px;line-height:1.6}
+.blast .chips{display:flex;flex-wrap:wrap;gap:10px}
+.blast .chk{display:inline-flex;align-items:center;gap:5px;font-size:12.5px;cursor:pointer}
+.blast .chk input{accent-color:var(--clay);width:auto}
+.blast .preview{margin:12px 0 0;padding:12px 14px;background:var(--surface-2);border:1px solid var(--line);border-radius:var(--r);font-size:12px;line-height:1.8;white-space:pre-wrap;max-height:340px;overflow:auto}
+.blast .prog{height:8px;background:var(--surface-3);border-radius:99px;overflow:hidden}
+.blast .prog>i{display:block;height:100%;background:var(--accent);transition:width .25s}
+
+/* 채널 카드 */
+.chcards{display:grid;gap:10px}
+@media(min-width:900px){.chcards{grid-template-columns:1fr 1fr}}
+.chcard{display:flex;gap:10px;align-items:flex-start;padding:12px 14px;border:1px solid var(--line-2);border-radius:var(--r);cursor:pointer;background:var(--surface)}
+.chcard:hover{background:var(--surface-2)}
+.chcard:has(input:checked){border-color:var(--accent);background:var(--accent-soft,var(--surface-2));box-shadow:inset 0 0 0 1px var(--accent)}
+.chcard input{accent-color:var(--clay);margin-top:3px;width:auto;flex:none}
+.chcard b{font-size:13.5px;margin-right:6px}
+.chcard p{margin:6px 0 4px;font-size:11.5px;color:var(--ink-2);line-height:1.6}
+.chcard span.mono{font-size:11px;color:var(--ink-3)}
