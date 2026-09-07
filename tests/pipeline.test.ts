@@ -1121,3 +1121,73 @@ test("법정 표기가 비면 발송을 막는다", async () => {
   assert.equal(final!.headers["List-Unsubscribe-Post"], "List-Unsubscribe=One-Click");
   assert.match(final!.headers["List-Unsubscribe"] ?? "", /diboutique\.com/);
 });
+
+// ---------- 직접 등록 ----------
+
+test("직접 등록은 정규화하고, 출처 없이는 저장하지 않는다", async () => {
+  const M = await import("../src/lib/manual-creator.ts");
+  await run(`DELETE FROM creator WHERE display_name='수동 등록 테스트'`);
+
+  const bad = [
+    [{ handle: "이건한글" }, /인스타 핸들/],
+    [{ handle: "" }, /인스타 핸들/],
+    // 출처는 소급이 불가능하다. 스키마가 NOT NULL 로 막지만 여기서 먼저 걸러 준다.
+    [{ handle: "@ok.handle", sourceType: "" }, /수집 출처/],
+    [{ handle: "@ok.handle", email: "not-an-email" }, /이메일/],
+    [{ handle: "@ok.handle", phone: "12" }, /전화번호/],
+    // 사전에 없는 카테고리는 적합도 20점을 조용히 0 으로 만든다.
+    [{ handle: "@ok.handle", category: "홈리빙" }, /카테고리/],
+  ] as const;
+
+  for (const [input, re] of bad) {
+    const r = await M.createManual({ sourceType: "business_card", ...input }, JAY);
+    assert.equal(r.ok, false, JSON.stringify(input));
+    assert.match(r.error ?? "", re);
+  }
+
+  // 주소를 그대로 붙여 넣어도 핸들만 남긴다. 임포터와 같은 정규화를 써야
+  // 같은 사람이 두 경로에서 다르게 저장되지 않는다.
+  const ok = await M.createManual({
+    handle: "https://instagram.com/Manual.Test_01/",
+    displayName: "수동 등록 테스트",
+    email: " Manual@Example.COM ", phone: "010-1234-5678",
+    followers: "5.4만", category: "리빙", tier: "B", hasGonggu: true,
+    linkInBio: "https://link.inpock.co.kr/manualtest",
+    sourceType: "business_card", note: "박람회 명함",
+  }, JAY);
+  assert.equal(ok.ok, true, ok.error);
+  assert.equal(ok.handle, "manual.test_01");
+
+  const contacts = await all<{ channel: string; value: string; source_type: string }>(
+    `SELECT channel, value, source_type FROM contact_point WHERE creator_id=$1 ORDER BY channel`,
+    [ok.creatorId!]);
+  const by = Object.fromEntries(contacts.map((c) => [c.channel, c.value]));
+  assert.equal(by.email, "manual@example.com", "이메일은 소문자·공백 제거");
+  assert.equal(by.phone, "01012345678", "전화는 숫자만");
+  // 링크 주소로 채널을 가른다 — 인포크 링크가 그냥 '링크' 로 들어가면 안 된다.
+  assert.equal(by.inpock_offer, "https://link.inpock.co.kr/manualtest");
+  assert.ok(contacts.every((c) => c.source_type === "business_card"), "출처가 전부 기록돼야 한다");
+
+  const snap = await one<{ followers: number; category_share: Record<string, number> }>(
+    `SELECT followers, category_share FROM account_snapshot
+      WHERE social_account_id=(SELECT id FROM social_account WHERE creator_id=$1)`, [ok.creatorId!]);
+  assert.equal(snap!.followers, 54000, '"5.4만" 을 숫자로');
+  assert.deepEqual(snap!.category_share, { 리빙: 100 });
+
+  // 같은 사람을 두 번 넣으면 두 번 보낸다. 새로 만들지 않고 기존을 가리킨다.
+  const dup = await M.createManual({ handle: "@Manual.Test_01", sourceType: "referral" }, JAY);
+  assert.equal(dup.ok, false);
+  assert.equal(dup.existingId, ok.creatorId);
+});
+
+test("발신 표시명은 법정 조직명과 따로 둔다", async () => {
+  // 푸터의 전송자 정보는 사업자등록증 상호여야 하지만, 메일함에 뜨는 이름은
+  // 브랜드로 쓰는 게 맞다. 같은 값을 쓰면 둘 중 하나를 포기해야 한다.
+  const S = await import("../src/lib/settings.ts");
+  await S.save({ "mail.org": "Dinostudio (주)", "mail.from_name": "" }, JAY);
+  assert.equal(await S.fromName(), "Dinostudio (주)", "표시명이 비면 조직명으로 떨어진다");
+
+  await S.save({ "mail.from_name": "디노스튜디오 파트너십" }, JAY);
+  assert.equal(await S.fromName(), "디노스튜디오 파트너십");
+  assert.equal(await S.get("mail.org"), "Dinostudio (주)", "법정 조직명은 그대로여야 한다");
+});

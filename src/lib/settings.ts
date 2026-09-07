@@ -36,8 +36,13 @@ export const SPECS: SettingSpec[] = [
     required: true, pattern: /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/, patternHint: "이메일 형식",
   },
   {
-    key: "mail.org", label: "발신 조직명", env: "MAIL_ORG_NAME", fallback: "Dinostudio (주)",
-    hint: "메일 푸터에 들어갑니다.", required: true,
+    key: "mail.from_name", label: "발신 표시명", env: "MAIL_FROM_NAME", fallback: "",
+    hint: "받는 사람의 메일함에 보이는 이름입니다 (예: 디노스튜디오 파트너십). 비우면 아래 조직명을 씁니다.",
+  },
+  {
+    key: "mail.org", label: "법정 조직명", env: "MAIL_ORG_NAME", fallback: "Dinostudio (주)",
+    hint: "광고 메일 푸터의 전송자 정보에 들어갑니다. 사업자등록증의 상호와 같아야 합니다 — 표시명과 달라도 됩니다.",
+    required: true,
   },
   {
     key: "mail.postal", label: "사업장 주소", env: "MAIL_POSTAL", fallback: "",
@@ -169,6 +174,17 @@ export async function mailReadiness(): Promise<{ ok: boolean; missing: string[] 
   const v = await getAll();
   const missing = SPECS.filter((s) => s.required && !v[s.key]).map((s) => s.label);
   return { ok: missing.length === 0, missing };
+}
+
+/**
+ * 받는 사람이 보는 발신 이름.
+ *
+ * 법정 조직명과 나눈다. 푸터의 전송자 정보는 사업자등록증 상호여야 하지만,
+ * 메일함에 뜨는 이름은 브랜드로 쓰는 게 자연스럽다 — "Dinostudio (주)" 가
+ * 발신자로 뜨면 콜드 메일에서 열람률이 떨어진다.
+ */
+export async function fromName(): Promise<string> {
+  return (await get("mail.from_name")) || (await get("mail.org"));
 }
 
 /** 수신거부 링크 기준 주소. */

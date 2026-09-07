@@ -17,14 +17,23 @@ export async function navGroups(): Promise<NavGroup[]> {
     // 011 이 밀린 배포에서도 사이드바는 떠야 한다.
     n(`SELECT count(*) AS n FROM blast WHERE state <> 'done'`).catch(() => 0),
   ]);
+  // 개요·공구 모니터링은 잠시 감춘다. 공구 데이터가 아직 없어서 캘린더·변화 감지가
+  // 빈 화면이고, 발송 흐름을 먼저 다듬는 중이다. 라우트는 그대로 살아 있으므로
+  // 주소로 직접 들어갈 수 있고, 이 배열에 다시 넣으면 즉시 돌아온다.
+  const HIDDEN = true;
+  void deals; void events;
+
   return [
-    { title: "개요", items: [{ href: "/plan", label: "설계 개요" }, { href: "/dashboard", label: "대시보드" }] },
-    { title: "공구 모니터링", items: [
-      { href: "/feed", label: "공구 캘린더", count: deals },
-      { href: "/watch", label: "변화 감지", count: events },
-    ] },
+    ...(HIDDEN ? [] : [
+      { title: "개요", items: [{ href: "/plan", label: "설계 개요" }, { href: "/dashboard", label: "대시보드" }] },
+      { title: "공구 모니터링", items: [
+        { href: "/feed", label: "공구 캘린더", count: deals },
+        { href: "/watch", label: "변화 감지", count: events },
+      ] },
+    ]),
     { title: "데이터", items: [
       { href: "/influencers", label: "인플루언서 DB", count: creators },
+      { href: "/influencers/new", label: "직접 등록" },
       { href: "/deals", label: "딜 · 브랜드 탐색" },
       { href: "/import", label: "데이터 임포트" },
     ] },

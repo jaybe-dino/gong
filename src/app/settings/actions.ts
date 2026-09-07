@@ -87,7 +87,7 @@ export async function sendTest(form: FormData): Promise<void> {
   try {
     const res = await gmail.send({
       from,
-      fromName: await settings.get("mail.org"),
+      fromName: await settings.fromName(),
       to,
       subject: "[아웃리치 콘솔] 발송 테스트",
       body:

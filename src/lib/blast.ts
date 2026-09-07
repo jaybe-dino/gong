@@ -378,10 +378,11 @@ export async function sendTest(blastId: string, to: string): Promise<{ ok: boole
   if (!from) {
     return { ok: false, detail: "발신 메일함이 없습니다. 설정에서 메일함을 등록하고 기본으로 지정하세요." };
   }
+  const display = await settings.fromName();
 
   try {
     const res = await gmail.send({
-      from, fromName: org, to,
+      from, fromName: display, to,
       subject: `[테스트] ${r.subject ?? b.name}`,
       body,
       headers: r.headers,
@@ -450,6 +451,7 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
   const base = await settings.get("mail.address");
   const from = b.mailbox_email ?? (await defaultMailbox());
   const policy = await policyFor(b.channel);
+  const display = await settings.fromName();
 
   let sent = 0, queued = 0, blocked = 0;
   for (const r of rows) {
@@ -480,7 +482,7 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
 
     try {
       const res = await gmail.send({
-        from: from!, fromName: org, to: r.contact,
+        from: from!, fromName: display, to: r.contact,
         replyTo: r.reply_token ? gmail.replyToAddress(base, r.reply_token) : null,
         subject, body, headers: r0.headers,
       });
