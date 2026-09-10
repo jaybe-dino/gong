@@ -3,6 +3,7 @@ import type { ReactNode } from "react";
 import { navGroups } from "@/lib/nav";
 import { one } from "@/lib/db";
 import { krDate, today } from "@/lib/clock";
+import FeedbackWidget from "./FeedbackWidget";
 
 /** 앱 셸. 사이드바 배지와 발신 계정 사용량은 매 요청마다 DB 에서 읽는다. */
 export default async function Shell({
@@ -72,6 +73,10 @@ export default async function Shell({
         </div>
         {children}
       </main>
+
+      {/* 어느 화면에서든 그 자리에서 제보할 수 있어야 한다. 셸에 두면 페이지마다
+          붙일 필요가 없고, 새로 만든 화면에서 빠지는 일도 없다. */}
+      <FeedbackWidget path={path} />
     </div>
   );
 }

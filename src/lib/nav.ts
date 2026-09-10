@@ -7,7 +7,7 @@ const n = async (sql: string) => Number((await one<{ n: string }>(sql))?.n ?? 0)
 
 /** 사이드바 배지는 실제 행 수다. 하드코딩하지 않는다. */
 export async function navGroups(): Promise<NavGroup[]> {
-  const [deals, events, creators, campaigns, tasks, threads, blasts] = await Promise.all([
+  const [deals, events, creators, campaigns, tasks, threads, blasts, feedback] = await Promise.all([
     n(`SELECT count(*) AS n FROM deal WHERE status='active'`),
     n(`SELECT count(*) AS n FROM change_event WHERE NOT is_read`),
     n(`SELECT count(*) AS n FROM creator WHERE merged_into IS NULL`),
@@ -16,6 +16,8 @@ export async function navGroups(): Promise<NavGroup[]> {
     n(`SELECT count(DISTINCT thread_key) AS n FROM message WHERE thread_key IS NOT NULL AND direction='in'`),
     // 011 이 밀린 배포에서도 사이드바는 떠야 한다.
     n(`SELECT count(*) AS n FROM blast WHERE state <> 'done'`).catch(() => 0),
+    // 015 가 밀린 배포에서도 사이드바는 떠야 한다.
+    n(`SELECT count(*) AS n FROM feedback WHERE status NOT IN ('done','wontfix')`).catch(() => 0),
   ]);
   // 개요·공구 모니터링은 잠시 감춘다. 공구 데이터가 아직 없어서 캘린더·변화 감지가
   // 빈 화면이고, 발송 흐름을 먼저 다듬는 중이다. 라우트는 그대로 살아 있으므로
@@ -47,6 +49,7 @@ export async function navGroups(): Promise<NavGroup[]> {
     { title: "설정", items: [
       { href: "/settings", label: "계정 연동 · 설정" },
       { href: "/policy", label: "채널 정책 · 발신 계정" },
+      { href: "/feedback", label: "개선 제보", count: feedback },
     ] },
   ];
 }

@@ -1413,3 +1413,73 @@ test("워밍업을 끄면 하드 실링만 남는다 — 끄는 것 자체가 �
   // 시간당 권장량은 워밍업 곡선과 별개다.
   assert.equal(b.allowedNow, 40);
 });
+
+// ---------- 개선 제보 ----------
+
+test("개선 제보 — 화면 정보와 첨부가 함께 남고 상태가 흐른다", async () => {
+  const F = await import("../src/lib/feedback.ts");
+
+  const png = Buffer.from(
+    "89504e470d0a1a0a0000000d494844520000000100000001080600000" +
+    "01f15c4890000000a49444154789c6360000002000100ffff0300000600" +
+    "05" + "0000000049454e44ae426082", "hex");
+
+  const id = await F.create({
+    title: "작업 큐에서 복사 버튼이 두 번 눌립니다",
+    body: "1 · 문안 복사를 누르면 '복사됨' 이 두 번 깜빡입니다.",
+    kind: "bug",
+    pagePath: "/queue",
+    pageTitle: "아웃리치 콘솔",
+    context: { viewport: "1360x900", trace: [{ path: "/blast" }, { path: "/queue" }] },
+    files: [{ mime: "image/png", filename: "shot.png", bytes: png }],
+  }, JAY);
+
+  const row = (await F.get(id))!;
+  assert.equal(row.status, "open", "새 제보는 요청 상태로 시작해야 한다");
+  assert.equal(row.page_path, "/queue");
+  assert.equal(row.images, 1);
+  assert.equal(row.done_at, null);
+  // 재현 정보가 통째로 남아야 한다 — 나중에 물어보면 이미 그 화면이 아니다.
+  assert.deepEqual((row.context as { trace: { path: string }[] }).trace.map((t) => t.path),
+                   ["/blast", "/queue"]);
+
+  const imgs = await F.images(id);
+  assert.equal(imgs.length, 1);
+  const bytes = await F.imageBytes(imgs[0].id);
+  assert.equal(bytes!.mime, "image/png");
+  assert.ok(bytes!.bytes.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex")),
+    "저장한 바이트가 그대로 돌아와야 한다");
+
+  // 진행 중 목록에 잡히고, 완료하면 빠진다.
+  assert.ok((await F.list()).some((r) => r.id === id));
+  await F.setStatus(id, "done");
+  const done = (await F.get(id))!;
+  assert.equal(done.status, "done");
+  assert.ok(done.done_at, "완료면 완료 시각이 있어야 한다");
+  assert.ok(!(await F.list()).some((r) => r.id === id), "완료가 진행 중 목록에 남아 있다");
+  assert.ok((await F.list("done")).some((r) => r.id === id));
+
+  // 되돌리면 완료 시각도 지워져야 한다 — 남아 있으면 "완료 아닌데 완료일이 있는" 행이 된다.
+  await F.setStatus(id, "doing");
+  assert.equal((await F.get(id))!.done_at, null);
+
+  await F.remove(id);
+  assert.equal(await F.get(id), null);
+  // 첨부는 제보를 지우면 같이 사라져야 한다.
+  assert.equal(await F.imageBytes(imgs[0].id), null, "첨부가 고아로 남았다");
+});
+
+test("완료 시각과 상태는 어긋날 수 없다 — 스키마가 막는다", async () => {
+  const F = await import("../src/lib/feedback.ts");
+  const id = await F.create({
+    title: "제약 점검", body: "", kind: "improve",
+    pagePath: null, pageTitle: null, context: {}, files: [],
+  }, JAY);
+  await assert.rejects(
+    () => run(`UPDATE feedback SET status='done' WHERE id=$1`, [id]),
+    /feedback_done_at_matches_status/);
+  await assert.rejects(
+    () => run(`UPDATE feedback SET done_at=now() WHERE id=$1`, [id]),
+    /feedback_done_at_matches_status/);
+  await F.remove(id);
+});
