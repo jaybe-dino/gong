@@ -6,7 +6,7 @@ import * as settings from "@/lib/settings";
 import { checkDomain, type DnsRecordCheck } from "@/lib/jobs/dns-check";
 import {
   addMailbox, dnsTest, makeDefault, probeMailbox, receiveTest,
-  removeMailbox, savePace, saveSettings, sendTest, toggleMailbox,
+  removeMailbox, savePace, saveSettings, sendTest, setEnforceCap, toggleMailbox,
 } from "./actions";
 import * as pace from "@/lib/pacing";
 
@@ -51,6 +51,7 @@ export default async function SettingsPage({
     (await hasTable("mail_test")) ? settings.recentTests(10) : Promise.resolve([]),
     pace.overview(),
   ]);
+  const enforceCap = await pace.isEnforced();
   // DNS 는 네트워크를 타므로 설정 값이 정해진 뒤에 본다.
   const dns = values["mail.domain"] ? await checkDomain(values["mail.domain"]) : null;
 
@@ -229,13 +230,28 @@ export default async function SettingsPage({
         </div>
 
         <Card title="발송량 상한 · 워밍업"
-              hint="하루에 보낼 수 있는 양. 계정 나이에서 계산합니다">
+              hint="하루 권장 발송량. 계정 나이에서 계산합니다">
           <div className="card-b">
             <p className="lede" style={{ margin: "0 0 12px" }}>
-              하루 상한은 직접 입력하지 않습니다 — <b>계정 나이</b>에서 계산합니다.
-              어제의 두 배를 오늘 보내는 것이 도메인·계정이 스팸으로 찍히는 가장 흔한
-              원인이라, 급할 때 숫자를 올릴 수 있는 칸을 두지 않았습니다.
+              하루 권장량은 <b>계정 나이</b>에서 계산합니다. 어제의 두 배를 오늘 보내는 것이
+              도메인·계정이 스팸으로 찍히는 가장 흔한 원인이라, 나이에 따라 단계적으로
+              올라가는 값을 보여줍니다.
             </p>
+
+            <form action={setEnforceCap} className="enforcebox">
+              <label className="chk">
+                <input type="checkbox" name="enforce" defaultChecked={enforceCap} />
+                <span>
+                  <b>권장 상한을 실제로 적용</b>
+                  <small>
+                    {enforceCap
+                      ? "켜져 있습니다 — 오늘 몫을 다 쓰면 발송이 그 자리에서 멈추고, 남은 대상은 내일 이어집니다."
+                      : "꺼져 있습니다 — 권장량은 화면에 표시만 하고 발송을 막지 않습니다. 대상 전원에게 나갑니다."}
+                  </small>
+                </span>
+              </label>
+              <button className="btn" type="submit">저장</button>
+            </form>
             {pacing.length === 0 ? (
               <Empty>
                 발신 계정이 아직 없습니다. 메일함을 등록하고 한 번 발송하면 여기에 나타납니다.
@@ -249,8 +265,8 @@ export default async function SettingsPage({
                     <input type="hidden" name="identifier" value={p.identifier} />
                     <div className="pacehead">
                       <b className="mono">{p.identifier}</b>
-                      <Pill tone={p.blocked ? "k-warn" : "k-ok"}>
-                        {p.blocked ? "오늘 대기" : `오늘 ${p.remaining}건 가능`}
+                      <Pill tone={p.advice ? "k-warn" : "k-ok"}>
+                        {p.advice ? "권장량 도달" : `오늘 권장 ${p.remaining}건`}
                       </Pill>
                     </div>
                     <div className="pacewhy" style={{ marginBottom: 10 }}>
@@ -267,7 +283,7 @@ export default async function SettingsPage({
                         </small>
                       </label>
                       <label className="field">
-                        <span>하드 실링 (일)</span>
+                        <span>하드 실링 (하루)</span>
                         <input name="cap" type="number" min={1} defaultValue={p.hardCap} />
                         <small style={{ color: "var(--ink-3)", fontSize: 11.5 }}>
                           워밍업 값이 이보다 크면 이 값이 이깁니다
@@ -276,7 +292,7 @@ export default async function SettingsPage({
                     </div>
                     <label className="chk" style={{ marginTop: 4 }}>
                       <input type="checkbox" name="warmup" defaultChecked={p.warmup} />
-                      <span>워밍업 적용 (끄면 하드 실링까지 바로 나갑니다)</span>
+                      <span>워밍업 곡선 사용 (끄면 권장량이 하드 실링과 같아집니다)</span>
                     </label>
                     <button className="btn" type="submit" style={{ marginTop: 10 }}>저장</button>
                   </form>
@@ -284,14 +300,16 @@ export default async function SettingsPage({
               </div>
             )}
             <Note tone="warn">
-              <b>수치의 근거</b>
+              <b>권장 곡선</b>
               <ul style={{ margin: "8px 0 0", paddingLeft: 18, lineHeight: 1.85 }}>
-                <li>이메일 — 신규 메일함 5건/일에서 시작, 7·14·21·30·45·60·90일에 걸쳐 5→50건.
-                  Workspace 공식 한도 2,000건/일은 콜드 발송과 무관합니다.</li>
-                <li>인스타 DM — 첫 주는 0건. 7일 5건 · 14일 20건 · 30일 40건 · 90일 60건 ·
-                  180일 이후 70건.</li>
-                <li>시간당 상한도 함께 걸립니다 (이메일 12건 · DM 10건) — 하루치를 한꺼번에
-                  쏟는 것도 급증입니다.</li>
+                <li>이메일 — 20건/일에서 시작해 7·14·21·30·45·60·90일에 걸쳐
+                  30 · 45 · 60 · 90 · 120 · 160 · 250건.</li>
+                <li>인스타 DM — 10건에서 시작해 20 · 30 · 40 · 50 · 60 · 70 · 80건.
+                  DM 의 천장은 우리가 아니라 인스타그램이 정합니다.</li>
+                <li>시간당 권장량도 있습니다 (이메일 40건 · DM 15건) — 하루치를 한꺼번에
+                  쏟는 것도 급증 신호입니다.</li>
+                <li>단계 사이가 두 배를 넘지 않게 짰습니다. 곡선을 건너뛰고 올리려면
+                  워밍업 곡선을 끄고 하드 실링을 직접 올리세요.</li>
               </ul>
             </Note>
           </div>

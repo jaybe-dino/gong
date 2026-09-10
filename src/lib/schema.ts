@@ -24,6 +24,7 @@ export const EXPECTED_MIGRATIONS = [
   "011_blast.sql",
   "012_blast_ad_label.sql",
   "013_blast_html_tracking.sql",
+  "014_sender_ceiling.sql",
 ];
 
 const tableCache = new Map<string, boolean>();

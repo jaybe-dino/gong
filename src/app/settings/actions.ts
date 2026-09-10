@@ -142,6 +142,17 @@ export async function dnsTest(): Promise<void> {
  * 숫자를 직접 올리는 것이 정확히 도메인이 타는 경로이기 때문이다. 여기서 정할 수
  * 있는 것은 세 가지뿐이다: 계정이 며칠 됐는지, 하드 실링, 워밍업을 끌 것인지.
  */
+/**
+ * 권장 상한을 실제로 적용할지. 기본은 꺼짐 — 워밍업은 가이드다.
+ */
+export async function setEnforceCap(form: FormData): Promise<void> {
+  const on = String(form.get("enforce") ?? "") === "on";
+  await settings.setFlag(pace.ENFORCE_KEY, on, JAY);
+  done(on
+    ? "권장 상한을 적용합니다 — 오늘 몫을 다 쓰면 발송이 멈춥니다."
+    : "권장 상한을 표시만 합니다 — 발송을 막지 않습니다.");
+}
+
 export async function savePace(form: FormData): Promise<void> {
   const id = String(form.get("id") ?? "");
   if (!id) done("발신 계정을 찾을 수 없습니다.", "err");
@@ -165,5 +176,6 @@ export async function savePace(form: FormData): Promise<void> {
 
   const b = await pace.budget(
     String(form.get("channel") ?? "email"), String(form.get("identifier") ?? ""));
-  done(`저장했습니다 — 오늘 상한 ${b.capToday}건 (${b.reason})`);
+  done(`저장했습니다 — 오늘 권장 ${b.capToday}건 (${b.reason})`
+       + (b.enforced ? " · 적용 중" : " · 참고용"));
 }

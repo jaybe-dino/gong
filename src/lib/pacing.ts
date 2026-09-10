@@ -1,5 +1,6 @@
 import { all, one, run } from "./db";
 import { hasColumn, hasTable } from "./schema";
+import { getFlag } from "./settings";
 
 /**
  * 발송 페이스 — 하루 상한 · 워밍업 증량 · 시간당 분산.
@@ -42,32 +43,33 @@ export const RULES: PaceRule[] = [
   {
     channel: "email",
     ramp: [
-      { minAgeDays: 90, cap: 50 },
-      { minAgeDays: 60, cap: 30 },
-      { minAgeDays: 45, cap: 25 },
-      { minAgeDays: 30, cap: 20 },
-      { minAgeDays: 21, cap: 15 },
-      { minAgeDays: 14, cap: 12 },
-      { minAgeDays: 7, cap: 10 },
-      { minAgeDays: 0, cap: 5 },
+      { minAgeDays: 90, cap: 250 },
+      { minAgeDays: 60, cap: 160 },
+      { minAgeDays: 45, cap: 120 },
+      { minAgeDays: 30, cap: 90 },
+      { minAgeDays: 21, cap: 60 },
+      { minAgeDays: 14, cap: 45 },
+      { minAgeDays: 7, cap: 30 },
+      { minAgeDays: 0, cap: 20 },
     ],
-    perHour: 12,
-    gapMs: 700,
+    perHour: 40,
+    gapMs: 250,
   },
   {
     channel: "instagram_dm",
     ramp: [
-      { minAgeDays: 180, cap: 70 },
-      { minAgeDays: 90, cap: 60 },
-      { minAgeDays: 60, cap: 45 },
-      { minAgeDays: 30, cap: 30 },
-      { minAgeDays: 21, cap: 20 },
-      { minAgeDays: 14, cap: 10 },
-      { minAgeDays: 7, cap: 5 },
-      // 첫 주는 0 이다. 만든 계정으로 바로 콜드 DM 을 보내면 그날 막힌다.
-      { minAgeDays: 0, cap: 0 },
+      { minAgeDays: 180, cap: 80 },
+      { minAgeDays: 90, cap: 70 },
+      { minAgeDays: 60, cap: 60 },
+      { minAgeDays: 30, cap: 50 },
+      { minAgeDays: 21, cap: 40 },
+      { minAgeDays: 14, cap: 30 },
+      { minAgeDays: 7, cap: 20 },
+      // DM 의 천장은 우리가 아니라 인스타그램이 정한다. 만든 지 얼마 안 된
+      // 계정으로 여기까지 밀면 며칠 막히는 쪽이 정상이다.
+      { minAgeDays: 0, cap: 10 },
     ],
-    perHour: 10,
+    perHour: 15,
     gapMs: 0, // 사람이 직접 누르는 채널이라 간격은 사람 속도가 정한다
   },
 ];
@@ -75,13 +77,18 @@ export const RULES: PaceRule[] = [
 /** 규칙이 없는 채널(인포크·인링크 등)은 사람이 손으로 하므로 넉넉히 둔다. */
 export const MANUAL_RULE: PaceRule = {
   channel: "manual",
-  ramp: [{ minAgeDays: 0, cap: 60 }],
-  perHour: 15,
+  ramp: [{ minAgeDays: 0, cap: 200 }],
+  perHour: 40,
   gapMs: 0,
 };
 
 export function ruleFor(channel: string): PaceRule {
   return RULES.find((r) => r.channel === channel) ?? MANUAL_RULE;
+}
+
+/** 이 채널이 끝까지 올라갔을 때의 값. 새 발신 계정의 하드 실링 기본값이 된다. */
+export function maxCap(channel: string): number {
+  return Math.max(...ruleFor(channel).ramp.map((r) => r.cap));
 }
 
 /**
@@ -125,6 +132,21 @@ const SELECT_SENDER = `
   SELECT *, CASE WHEN sent_date = CURRENT_DATE THEN sent_today ELSE 0 END AS sent_effective
     FROM sender WHERE identifier = $1`;
 
+/**
+ * 권장 상한을 실제로 적용할지.
+ *
+ * 기본은 꺼져 있다 — 워밍업은 가이드다. 화면에 권장치와 근거를 보여주되 발송을
+ * 막지 않는다. 급한 발송을 시스템이 대신 판단해 세우면, 사람은 그 판단을 끄는
+ * 방법부터 찾게 되고 결국 가드 전체가 꺼진 채로 남는다.
+ *
+ * 켜면 오늘 몫을 다 쓴 시점에서 실제로 멈춘다.
+ */
+export const ENFORCE_KEY = "send.enforce_cap";
+
+export async function isEnforced(): Promise<boolean> {
+  return getFlag(ENFORCE_KEY);
+}
+
 export interface Budget {
   senderId: string | null;
   identifier: string;
@@ -138,14 +160,25 @@ export interface Budget {
   allowedNow: number;
   /** 상한 계산의 근거. 화면에 그대로 보여준다. */
   reason: string;
-  /** 아예 막힌 경우의 이유. null 이면 보낼 수 있다. */
+  /**
+   * 권장치를 넘었을 때 하고 싶은 말. 적용 여부와 무관하게 항상 채운다 —
+   * 막지 않더라도 지금 권장선을 넘고 있다는 사실은 보여야 한다.
+   */
+  advice: string | null;
+  /**
+   * 실제로 발송을 세우는 이유. 적용이 꺼져 있으면 언제나 null 이다.
+   * 이 값이 있을 때만 sendChunk 가 청크를 자른다.
+   */
   blocked: string | null;
+  /** 권장 상한을 실제로 적용하는 중인가. */
+  enforced: boolean;
   gapMs: number;
 }
 
 const NO_SENDER: Omit<Budget, "identifier"> = {
   senderId: null, capToday: 0, sentToday: 0, remaining: 0, allowedNow: 0,
-  reason: "", blocked: "발신 계정이 등록되지 않았습니다", gapMs: 0,
+  reason: "", advice: "발신 계정이 등록되지 않았습니다", blocked: null,
+  enforced: false, gapMs: 0,
 };
 
 /**
@@ -162,11 +195,13 @@ export async function ensureSender(
   const found = await one<SenderRow>(SELECT_SENDER, [identifier]);
   if (found) return found;
 
+  // 하드 실링을 램프 꼭대기에 맞춘다. 스키마 기본값 75 를 그대로 두면 램프가
+  // 250 까지 올라가도 75 에서 잘리고, 왜 안 오르는지 화면만 봐서는 알 수 없다.
   await run(
-    `INSERT INTO sender (channel, identifier, display_name, current_cap, warmup_on)
-     VALUES ($1,$2,$3,$4,true)
+    `INSERT INTO sender (channel, identifier, display_name, current_cap, daily_cap, warmup_on)
+     VALUES ($1,$2,$3,$4,$5,true)
      ON CONFLICT (identifier) DO NOTHING`,
-    [channel, identifier, displayName ?? null, rampCap(channel, 0)]);
+    [channel, identifier, displayName ?? null, rampCap(channel, 0), maxCap(channel)]);
   const row = (await one<SenderRow>(SELECT_SENDER, [identifier])) ?? null;
 
   // mailbox 와 sender 를 이어 둔다. 끊어져 있으면 메일함 화면과 상한 화면이 서로
@@ -192,8 +227,12 @@ async function sentLastHour(senderId: string): Promise<number> {
 /**
  * 지금 이 발신 계정으로 얼마나 보낼 수 있는가.
  *
- * 상한은 세 개를 동시에 통과해야 한다: 하루 상한 · 시간당 상한 · 일시정지 여부.
- * 하나라도 걸리면 그 수치가 답이 된다 — 가장 작은 값이 이긴다.
+ * 세 가지가 권장선을 만든다: 하루 상한 · 시간당 상한 · 일시정지 여부.
+ * 가장 작은 값이 이긴다.
+ *
+ * 그 값을 실제로 강제할지는 별개다(ENFORCE_KEY). 기본은 강제하지 않는다 —
+ * advice 에만 담고 blocked 는 비운다. 사용 중지·정지처럼 사람이 직접 세워 둔
+ * 상태만 적용 여부와 무관하게 막는다.
  */
 export async function budget(
   channel: string, identifier: string, displayName?: string | null,
@@ -202,21 +241,27 @@ export async function budget(
   if (!s) return { ...NO_SENDER, identifier };
 
   const rule = ruleFor(channel);
+  const enforced = await isEnforced();
+
+  // 아래 둘은 워밍업 권장치가 아니라 사람이 직접 세워 둔 상태다. 가이드로 낮출
+  // 성질의 것이 아니므로 적용 여부와 상관없이 막는다.
   if (!s.is_active) {
-    return { ...NO_SENDER, senderId: s.id, identifier, gapMs: rule.gapMs,
+    return { ...NO_SENDER, senderId: s.id, identifier, gapMs: rule.gapMs, enforced,
+             advice: `${identifier} 사용 중지 상태입니다`,
              blocked: `${identifier} 사용 중지 상태입니다` };
   }
   if (s.paused_until && new Date(s.paused_until) > new Date()) {
     const until = String(s.paused_until).slice(0, 16).replace("T", " ");
-    return { ...NO_SENDER, senderId: s.id, identifier, gapMs: rule.gapMs,
-             blocked: `${identifier} 정지 중 (${until}${s.pause_reason ? ` · ${s.pause_reason}` : ""})` };
+    const why = `${identifier} 정지 중 (${until}${s.pause_reason ? ` · ${s.pause_reason}` : ""})`;
+    return { ...NO_SENDER, senderId: s.id, identifier, gapMs: rule.gapMs, enforced,
+             advice: why, blocked: why };
   }
 
   // 워밍업을 끄면 하드 실링만 남는다 — 끄는 것 자체가 눈에 보이는 결정이어야 한다.
   const ramp = s.warmup_on ? rampCap(channel, s.account_age_d) : s.daily_cap;
   const capToday = Math.min(ramp, s.daily_cap);
   const reason = s.warmup_on
-    ? `계정 ${s.account_age_d ?? 0}일 → 워밍업 상한 ${ramp}건` +
+    ? `계정 ${s.account_age_d ?? 0}일 → 권장 상한 ${ramp}건` +
       (s.daily_cap < ramp ? ` (하드 실링 ${s.daily_cap}건이 더 낮음)` : "")
     : `워밍업 해제 · 하드 실링 ${s.daily_cap}건`;
 
@@ -226,17 +271,18 @@ export async function budget(
   const hour = await sentLastHour(s.id);
   const allowedNow = Math.max(0, Math.min(remaining, rule.perHour - hour));
 
-  let blocked: string | null = null;
+  let advice: string | null = null;
   if (capToday === 0) {
-    blocked = `${identifier} 는 아직 콜드 발송을 시작할 수 없습니다 (${reason})`;
+    advice = `${identifier} 는 권장 상한이 0 입니다 (${reason})`;
   } else if (remaining === 0) {
-    blocked = `${identifier} 오늘 상한 도달 (${sentToday}/${capToday}) — 내일 이어서 보내세요`;
+    advice = `${identifier} 오늘 권장량 도달 (${sentToday}/${capToday}) — 내일 이어서 보내는 것을 권합니다`;
   } else if (allowedNow === 0) {
-    blocked = `${identifier} 시간당 상한 도달 (최근 1시간 ${hour}/${rule.perHour}) — 잠시 뒤 이어서 보내세요`;
+    advice = `${identifier} 시간당 권장량 도달 (최근 1시간 ${hour}/${rule.perHour}) — 잠시 뒤 이어서 보내는 것을 권합니다`;
   }
 
   return { senderId: s.id, identifier, capToday, sentToday, remaining, allowedNow,
-           reason, blocked, gapMs: rule.gapMs };
+           reason, advice, blocked: enforced ? advice : null, enforced,
+           gapMs: rule.gapMs };
 }
 
 /**
@@ -258,7 +304,8 @@ export async function consume(senderId: string, n = 1): Promise<void> {
 export async function overview(): Promise<(Budget & { channel: string; ageDays: number | null; hardCap: number; warmup: boolean })[]> {
   if (!(await hasTable("sender"))) return [];
   const rows = await all<SenderRow>(
-    `SELECT channel, identifier FROM sender ORDER BY channel, identifier`);
+    `SELECT channel, identifier, account_age_d, daily_cap, warmup_on
+       FROM sender ORDER BY channel, identifier`);
   const out = [];
   for (const s of rows) {
     const b = await budget(s.channel, s.identifier);

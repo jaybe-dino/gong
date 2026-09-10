@@ -169,6 +169,30 @@ export async function save(
   return [];
 }
 
+/**
+ * SPECS 에 없는 on/off 값.
+ *
+ * 발신 정보 폼은 텍스트 칸을 SPECS 로 그린다. 체크박스 하나를 거기 끼워 넣으면
+ * 빈 입력 칸으로 그려지므로 별도 통로를 둔다.
+ */
+export async function getFlag(key: string): Promise<boolean> {
+  if (!(await hasTable("app_setting"))) return false;
+  return (await load()).get(key) === "on";
+}
+
+export async function setFlag(key: string, on: boolean, userId: string): Promise<void> {
+  if (!(await hasTable("app_setting"))) return;
+  if (on) {
+    await run(
+      `INSERT INTO app_setting (key, value, updated_by) VALUES ($1,'on',$2)
+       ON CONFLICT (key) DO UPDATE SET value='on', updated_at=now(), updated_by=EXCLUDED.updated_by`,
+      [key, userId]);
+  } else {
+    await run(`DELETE FROM app_setting WHERE key=$1`, [key]);
+  }
+  invalidate();
+}
+
 /** 발송에 필요한 값이 다 있는지. 없으면 게이트가 막아야 한다. */
 export async function mailReadiness(): Promise<{ ok: boolean; missing: string[] }> {
   const v = await getAll();

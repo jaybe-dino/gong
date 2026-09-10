@@ -747,26 +747,31 @@ test("메일은 MIME 규격을 지킨다 — 줄 길이·인코딩 워드·CRLF�
 // sendChunk 가 sender 를 보지 않아서 대상 전원이 한 번에 나가던 구멍을 막은 뒤,
 // 상한 계산이 규칙대로인지 고정한다.
 
-test("워밍업 상한 — 계정 나이가 상한을 정한다", () => {
-  assert.equal(pacing.rampCap("email", 0), 5);
-  assert.equal(pacing.rampCap("email", 6), 5);
-  assert.equal(pacing.rampCap("email", 7), 10);
-  assert.equal(pacing.rampCap("email", 14), 12);
-  assert.equal(pacing.rampCap("email", 30), 20);
-  assert.equal(pacing.rampCap("email", 400), 50);
+test("워밍업 권장량 — 계정 나이가 값을 정한다", () => {
+  assert.equal(pacing.rampCap("email", 0), 20);
+  assert.equal(pacing.rampCap("email", 6), 20);
+  assert.equal(pacing.rampCap("email", 7), 30);
+  assert.equal(pacing.rampCap("email", 14), 45);
+  assert.equal(pacing.rampCap("email", 30), 90);
+  assert.equal(pacing.rampCap("email", 400), 250);
 });
 
-test("나이를 모르면 가장 보수적인 값 — 새 메일함으로 대량 발송하는 사고를 막는다", () => {
-  assert.equal(pacing.rampCap("email", null), 5);
-  assert.equal(pacing.rampCap("instagram_dm", null), 0);
+test("나이를 모르면 곡선의 첫 단계로 본다", () => {
+  assert.equal(pacing.rampCap("email", null), 20);
+  assert.equal(pacing.rampCap("instagram_dm", null), 10);
 });
 
-test("인스타 DM 첫 주는 0건 — 만든 계정으로 바로 콜드 DM 을 보내면 그날 막힌다", () => {
-  assert.equal(pacing.rampCap("instagram_dm", 3), 0);
-  assert.equal(pacing.rampCap("instagram_dm", 7), 5);
-  assert.equal(pacing.rampCap("instagram_dm", 14), 10);
-  assert.equal(pacing.rampCap("instagram_dm", 30), 30);
-  assert.equal(pacing.rampCap("instagram_dm", 180), 70);
+test("인스타 DM 곡선", () => {
+  assert.equal(pacing.rampCap("instagram_dm", 3), 10);
+  assert.equal(pacing.rampCap("instagram_dm", 7), 20);
+  assert.equal(pacing.rampCap("instagram_dm", 14), 30);
+  assert.equal(pacing.rampCap("instagram_dm", 30), 50);
+  assert.equal(pacing.rampCap("instagram_dm", 180), 80);
+});
+
+test("하드 실링 기본값은 곡선 꼭대기 — 스키마 기본 75 가 곡선을 눌러버리면 안 된다", () => {
+  assert.equal(pacing.maxCap("email"), 250);
+  assert.equal(pacing.maxCap("instagram_dm"), 80);
 });
 
 test("단계 사이가 두 배를 넘지 않는다 — 볼륨 급증이 계정이 찍히는 가장 흔한 원인", () => {

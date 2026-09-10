@@ -541,13 +541,16 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
   // 발송량 상한. 자동 채널만 해당한다 — 사람이 붙여넣는 채널은 큐에 쌓는 것이
   // 발송이 아니므로 여기서 깎으면 하루치만 큐에 들어가고 나머지가 사라진 것처럼
   // 보인다. 그쪽은 큐 화면에서 사람이 하루에 처리하는 양이 곧 상한이다.
+  // 적용이 꺼져 있으면 budget 은 계측용이다 — 카운터는 계속 깎지만 청크를 자르지
+  // 않는다. 워밍업은 가이드이고, 보낼지 말지는 사람이 정한다.
   const budget = ch.auto ? pre.pace : null;
-  if (budget?.blocked) {
+  const cap = budget?.enforced ? budget : null;
+  if (cap?.blocked) {
     const left = await countRemaining(blastId, b.campaign_id);
     return { sent: 0, queued: 0, blocked: 0, remaining: left, done: left === 0,
-             paced: budget.blocked };
+             paced: cap.blocked };
   }
-  const take = budget ? Math.min(limit, budget.allowedNow) : limit;
+  const take = cap ? Math.min(limit, cap.allowedNow) : limit;
   if (take <= 0) {
     const left = await countRemaining(blastId, b.campaign_id);
     return { sent: 0, queued: 0, blocked: 0, remaining: left, done: left === 0,
@@ -670,8 +673,8 @@ export async function sendChunk(blastId: string, limit = 40): Promise<SendProgre
   }
   // 상한에 걸려 청크가 잘렸으면 화면에 알려야 한다. 그냥 remaining 만 돌려주면
   // 화면이 끝없이 이어 돌리고, 매번 0건이 나가면서 다 끝난 것처럼 보인다.
-  const paced = budget && sent >= take && remaining > 0
-    ? `오늘 몫 ${budget.capToday}건을 다 썼습니다 — 남은 ${remaining.toLocaleString("ko-KR")}명은 내일 이어서 보내세요.`
+  const paced = cap && sent >= take && remaining > 0
+    ? `오늘 몫 ${cap.capToday}건을 다 썼습니다 — 남은 ${remaining.toLocaleString("ko-KR")}명은 내일 이어서 보내세요.`
     : null;
   return { sent, queued, blocked, remaining, done: remaining === 0, paced };
 }
@@ -757,14 +760,21 @@ export async function preflight(blastId: string): Promise<Preflight> {
     }
     if (from) {
       budget = await pace.budget(b.channel, from, await settings.fromName());
-      // 상한 도달은 blocker 가 아니다 — 오늘 몫을 이미 보냈다는 뜻이고, 내일 이어
-      // 보내면 된다. 여기서 blocker 로 만들면 발송 자체가 실패한 것처럼 보인다.
-      if (budget.blocked && budget.capToday === 0) blockers.push(budget.blocked);
-      else if (budget.blocked) warnings.push(budget.blocked);
-      else if (b.target_count > budget.remaining) {
+      // 권장 상한은 blocker 가 아니다. 적용을 켜 두었더라도 "오늘 몫을 다 썼다" 는
+      // 뜻이지 발송이 실패한 것이 아니므로 경고로만 올린다. 사람이 직접 세워 둔
+      // 사용 중지·정지만 발송을 막는다.
+      if (budget.blocked && budget.capToday === 0 && !budget.senderId) {
+        blockers.push(budget.blocked);
+      } else if (budget.advice) {
+        warnings.push(budget.advice);
+      } else if (budget.enforced && b.target_count > budget.remaining) {
         warnings.push(
           `대상 ${b.target_count.toLocaleString("ko-KR")}명 중 오늘은 ${budget.remaining}명까지 나갑니다 ` +
           `(${budget.reason}). 나머지는 내일 이어서 보내세요.`);
+      } else if (b.target_count > budget.remaining) {
+        warnings.push(
+          `권장 상한은 ${budget.remaining}명입니다 (${budget.reason}). ` +
+          `적용이 꺼져 있어 ${b.target_count.toLocaleString("ko-KR")}명 전원에게 나갑니다.`);
       }
     }
   }

@@ -484,14 +484,22 @@ test("회신 분류 3 — 확정으로 옮기고 어트리뷰션 토큰을 발�
 test("서킷브레이커 — 임계를 넘으면 발신 계정을 정지시킨다", async () => {
   await run(`UPDATE circuit_breaker SET halt_at = 0, warn_at = 0 WHERE metric='bounce_rate'`);
   // 바운스 이벤트를 만들어 비율을 올린다.
-  // 창(7일) 안의 실제 발송 건이어야 한다 — ORDER BY 없는 LIMIT 1 은 실행마다
-  // 다른 행을 집고, dry-run 은 브레이커가 세지 않으므로 비율이 0 이 된다.
-  const msg = await one<{ id: string }>(
-    `SELECT id FROM message
-      WHERE direction='out' AND channel='email' AND status='sent'
-        AND sent_at >= now() - interval '3 days'
-      ORDER BY sent_at DESC LIMIT 1`);
-  assert.ok(msg, "최근 7일 안의 실제 발송 건이 있어야 한다");
+  // 창 안의 실제 발송 건이어야 한다 — ORDER BY 없는 LIMIT 1 은 실행마다 다른
+  // 행을 집고, dry-run 은 브레이커가 세지 않으므로 비율이 0 이 된다.
+  //
+  // 창 길이를 여기 적어 두면 브레이커와 어긋난다. 그리고 시드의 발송 날짜는
+  // 고정이라 달력이 흐르면 언젠가 창 밖으로 빠진다 — 실제로 그렇게 깨졌다.
+  // 그래서 창 밖이면 가장 최근 건을 창 안으로 끌어온다.
+  const pick = `SELECT id FROM message
+                 WHERE direction='out' AND channel='email' AND status='sent'
+                 ORDER BY sent_at DESC LIMIT 1`;
+  const newest = await one<{ id: string }>(pick);
+  assert.ok(newest, "시드에 실제 발송 건이 있어야 한다");
+  await run(
+    `UPDATE message SET sent_at = now() - interval '1 hour'
+      WHERE id=$1 AND sent_at < now() - ($2 || ' days')::interval`,
+    [newest!.id, String(breaker.WINDOW_DAYS)]);
+  const msg = newest;
   await run(`INSERT INTO message_event (message_id, type) VALUES ($1,'bounce_hard')`, [msg!.id]);
 
   const r = await breaker.tick();
@@ -1306,10 +1314,11 @@ test("클릭 추적은 우리가 넣은 주소로만 보낸다", async () => {
 
 // ---------- 발송량 상한 · 워밍업 ----------
 
-test("발송량 상한 — 대상이 많아도 오늘 몫만 나가고 나머지는 남는다", async () => {
+test("발송량 상한 — 적용을 켜면 오늘 몫만 나가고 나머지는 남는다", async () => {
   const B = await import("../src/lib/blast.ts");
   const P = await import("../src/lib/pacing.ts");
   const S = await import("../src/lib/settings.ts");
+  await S.setFlag(P.ENFORCE_KEY, true, JAY);
   await S.save({ "app.base_url": "https://www.diboutique.com", "mail.domain": "diboutique.com",
                  "mail.postal": "서울시 성동구", "mail.phone": "02-1234-5678" }, JAY);
 
@@ -1327,8 +1336,10 @@ test("발송량 상한 — 대상이 많아도 오늘 몫만 나가고 나머지
   // 시간당 상한이 이전 실행의 메시지 때문에 걸리면 이 테스트가 무의미해진다.
   await run(`UPDATE message SET sent_at = now() - interval '2 hours'
               WHERE sender_id=$1 AND sent_at > now() - interval '1 hour'`, [s.id]);
+  // 곡선 첫 단계는 20 이지만 이 테스트는 5 에서 자르는 것을 본다.
+  await run(`UPDATE sender SET daily_cap=5 WHERE id=$1`, [s.id]);
   assert.equal((await P.budget("email", box)).capToday, 5,
-    "신규 계정의 하루 상한은 5건이어야 한다");
+    "하드 실링 5 가 곡선보다 낮으므로 5 가 되어야 한다");
 
   const id = await B.createBlast("상한 점검", "email", JAY);
   await B.saveFilters(id, { limit: 20 }, box);
@@ -1357,17 +1368,34 @@ test("발송량 상한 — 대상이 많아도 오늘 몫만 나가고 나머지
   assert.equal(again.sent, 0, "상한 도달 후에도 발송이 계속됐다");
   assert.ok(again.paced, "상한 도달을 알려줘야 한다");
   assert.ok(again.remaining > 0);
+
+  // 적용을 끄면 같은 상태에서 그냥 나간다 — 워밍업은 가이드이고 발송을 막지 않는다.
+  await S.setFlag(P.ENFORCE_KEY, false, JAY);
+  const b3 = await P.budget("email", box);
+  assert.equal(b3.blocked, null, "적용이 꺼졌는데 여전히 막고 있다");
+  assert.ok(b3.advice, "막지 않더라도 권장선을 넘었다는 말은 있어야 한다");
+  const free = await B.sendChunk(id, 40);
+  assert.ok(free.sent > 0, "적용이 꺼졌는데 발송이 나가지 않았다");
+  assert.equal(free.paced, null, "적용이 꺼졌으면 멈춤 사유가 없어야 한다");
 });
 
-test("첫 주 DM 은 아예 못 나간다 — preflight 가 막는다", async () => {
+test("사용 중지·정지는 적용 여부와 무관하게 막는다 — 사람이 직접 세워 둔 상태다", async () => {
   const P = await import("../src/lib/pacing.ts");
+  const S = await import("../src/lib/settings.ts");
+  await S.setFlag(P.ENFORCE_KEY, false, JAY);
+
   const box = "@cap-test-dm";
   const s = (await P.ensureSender("instagram_dm", box, "테스트"))!;
-  await run(`UPDATE sender SET account_age_d=2, warmup_on=true, paused_until=NULL WHERE id=$1`, [s.id]);
+  await run(`UPDATE sender SET account_age_d=200, warmup_on=true,
+                               paused_until = now() + interval '1 day', pause_reason='액션 블록'
+              WHERE id=$1`, [s.id]);
+  const paused = await P.budget("instagram_dm", box);
+  assert.match(paused.blocked ?? "", /정지 중/, "적용이 꺼져도 정지는 막아야 한다");
 
-  const b = await P.budget("instagram_dm", box);
-  assert.equal(b.capToday, 0);
-  assert.match(b.blocked ?? "", /콜드 발송을 시작할 수 없습니다/);
+  await run(`UPDATE sender SET paused_until=NULL, pause_reason=NULL WHERE id=$1`, [s.id]);
+  const ok = await P.budget("instagram_dm", box);
+  assert.equal(ok.blocked, null);
+  assert.equal(ok.capToday, 80);
 });
 
 test("워밍업을 끄면 하드 실링만 남는다 — 끄는 것 자체가 눈에 보이는 결정이다", async () => {
@@ -1382,6 +1410,6 @@ test("워밍업을 끄면 하드 실링만 남는다 — 끄는 것 자체가 �
   const b = await P.budget("email", box);
   assert.equal(b.capToday, 75);
   assert.match(b.reason, /워밍업 해제/);
-  // 시간당 상한은 워밍업과 별개로 계속 걸린다.
-  assert.equal(b.allowedNow, 12);
+  // 시간당 권장량은 워밍업 곡선과 별개다.
+  assert.equal(b.allowedNow, 40);
 });

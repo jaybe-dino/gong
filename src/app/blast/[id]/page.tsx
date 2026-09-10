@@ -407,19 +407,29 @@ export default async function BlastPage({
                       <div>
                         <span className="pacenum">{pre.pace.remaining.toLocaleString("ko-KR")}</span>
                         <span className="pacecap">/ {pre.pace.capToday}건</span>
-                        <span className="pacelabel">오늘 남은 발송 여유</span>
+                        <span className="pacelabel">
+                          오늘 권장 발송량{pre.pace.enforced ? " · 적용 중" : " · 참고용"}
+                        </span>
                       </div>
                       <div className="pacewhy">
                         {pre.pace.identifier} · {pre.pace.reason}
                         {pre.pace.sentToday > 0 && ` · 오늘 ${pre.pace.sentToday}건 보냄`}
                       </div>
                     </div>
-                    {b.target_count > pre.pace.remaining && (
+                    {pre.pace.enforced ? (
+                      b.target_count > pre.pace.remaining && (
+                        <p className="subnote" style={{ marginTop: 8 }}>
+                          적용이 켜져 있어 오늘 {pre.pace.remaining.toLocaleString("ko-KR")}명까지
+                          나가고 멈춥니다 — 내일 같은 버튼을 눌러 이어서 보내세요.
+                        </p>
+                      )
+                    ) : (
                       <p className="subnote" style={{ marginTop: 8 }}>
-                        대상이 여유보다 많습니다. 오늘 {pre.pace.remaining.toLocaleString("ko-KR")}명까지
-                        나가고 멈춥니다 — 내일 같은 버튼을 눌러 이어서 보내세요.
-                        상한을 올리려면 <a href="/settings">설정 → 발신 계정</a> 에서
-                        계정 나이와 하드 실링을 확인하세요.
+                        <b>권장치일 뿐 발송을 막지 않습니다.</b> 지금 발송하면 대상{" "}
+                        {b.target_count.toLocaleString("ko-KR")}명 전원에게 나갑니다.
+                        {b.target_count > pre.pace.remaining && " 권장선을 넘는 만큼 도달률이 떨어질 수 있습니다."}
+                        {" "}실제로 멈추게 하려면 <a href="/settings">설정 → 발송량 상한</a> 에서
+                        「권장 상한을 실제로 적용」을 켜세요.
                       </p>
                     )}
                   </div>
