@@ -581,3 +581,12 @@ ul.tight li{margin-bottom:5px}
 .btn.sm.danger{color:var(--stop);border-color:var(--stop)}
 .fbnoteform{display:flex;gap:8px;margin-top:10px}
 .fbnoteform input{flex:1}
+/* 발신·회신 주소를 나란히 둔다. 둘이 다를 수 있다는 것 자체가 잘 안 보인다. */
+.idbox{display:grid;gap:1px;background:var(--line);border:1px solid var(--line);
+  border-radius:var(--r);overflow:hidden;margin-bottom:12px}
+@media(min-width:640px){.idbox{grid-template-columns:repeat(3,1fr)}}
+.idbox>div{background:var(--surface);padding:10px 13px}
+.idbox span{display:block;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+  color:var(--ink-3);margin-bottom:3px}
+.idbox b{font-size:13px;font-weight:500;word-break:break-all}
+.dot.off{background:var(--stop)}

@@ -9,6 +9,7 @@ import {
   removeMailbox, savePace, saveSettings, sendTest, setEnforceCap, toggleMailbox,
 } from "./actions";
 import * as pace from "@/lib/pacing";
+import { sendingIdentity } from "@/lib/queries";
 
 export const dynamic = "force-dynamic";
 export const maxDuration = 60;
@@ -51,6 +52,7 @@ export default async function SettingsPage({
     (await hasTable("mail_test")) ? settings.recentTests(10) : Promise.resolve([]),
     pace.overview(),
   ]);
+  const ident = await sendingIdentity();
   const enforceCap = await pace.isEnforced();
   // DNS 는 네트워크를 타므로 설정 값이 정해진 뒤에 본다.
   const dns = values["mail.domain"] ? await checkDomain(values["mail.domain"]) : null;
@@ -124,6 +126,33 @@ export default async function SettingsPage({
             </form>
           }
         >
+          <div className="card-b" style={{ paddingBottom: 0 }}>
+            <div className="idbox">
+              <div>
+                <span>발신 (From)</span>
+                <b className="mono">{ident.from ?? "없음 — 아래에서 등록하세요"}</b>
+              </div>
+              <div>
+                <span>회신 수신 (Reply-To)</span>
+                <b className="mono">{ident.replyTo}</b>
+              </div>
+              <div>
+                <span>인박스 수집</span>
+                <b className="mono">{ident.inboxCount}개 메일함</b>
+              </div>
+            </div>
+            {!ident.replyBoxRegistered && (
+              <Note tone="stop">
+                <b>회신 주소 {ident.replyTo} 가 이 목록에 없습니다.</b>
+                <p style={{ margin: "6px 0 0", lineHeight: 1.8 }}>
+                  보내는 메일의 Reply-To 는 <code className="mono">{ident.replyTo}</code> 로 나가는데,
+                  통합 인박스는 <b>아래에 등록된 메일함만</b> 읽습니다. 이대로 두면 답장이 와도
+                  화면에 들어오지 않습니다. 그 주소를 아래에서 등록하거나,{" "}
+                  <b>발신 정보</b>의 「발신 주소」를 등록된 메일함으로 바꾸세요.
+                </p>
+              </Note>
+            )}
+          </div>
           <Scroller wide>
             <table>
               <thead>

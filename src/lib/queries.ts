@@ -3,6 +3,9 @@ import { fitScore, relatedCategories, timing, type ScoreInput, type ScoreResult,
 import type { ChannelPolicy, SuppressionRow } from "./policy-gate";
 import { LINK_FORM_CHANNELS, REACHABLE_CHANNELS, sqlList, sqlRank } from "./channels/kinds";
 import { hasColumn, hasTable } from "./schema";
+import * as sa from "./google-sa";
+import * as settings from "./settings";
+import * as pacing from "./pacing";
 
 /**
  * 화면이 쓰는 조회 계층.
@@ -389,4 +392,54 @@ export async function senders(channel?: string) {
        FROM sender ${channel ? "WHERE channel = $1" : ""} ORDER BY channel, identifier`,
     channel ? [channel] : [],
   );
+}
+
+/**
+ * 지금 메일이 나가고 회신이 들어오는 주소.
+ *
+ * 화면 여러 곳이 "발신 계정" 을 보여주는데, 전에는 sender 표에서 아무 행이나
+ * 하나 집어 왔다. 시드로 들어온 주소가 떴고 등록한 메일함과 아무 관계가 없었다.
+ * 보이는 주소가 실제와 다르면 화면을 믿을 수 없다.
+ *
+ * 발신(From)은 기본 메일함, 회신 수신은 mail.address 다. 둘은 다를 수 있지만,
+ * 회신 주소의 메일함이 등록돼 있지 않으면 회신을 아무도 읽지 않는다.
+ */
+export interface SendingIdentity {
+  /** 실제로 메일이 나가는 주소. 없으면 발송이 막힌다. */
+  from: string | null;
+  /** 회신이 돌아오는 주소 (mail.address). */
+  replyTo: string;
+  /** 회신 주소의 메일함이 등록·활성 상태인가. 아니면 회신을 읽지 못한다. */
+  replyBoxRegistered: boolean;
+  /** 수집 대상으로 등록된 메일함 수. */
+  inboxCount: number;
+  ok: boolean;
+  note: string;
+  budget: pacing.Budget | null;
+}
+
+export async function sendingIdentity(): Promise<SendingIdentity> {
+  const [boxes, replyTo, configured] = await Promise.all([
+    sa.mailboxes(),
+    settings.get("mail.address"),
+    Promise.resolve(sa.isConfigured()),
+  ]);
+  const enabled = boxes.filter((b) => b.enabled);
+  const from = (await sa.defaultMailbox()) ?? enabled[0]?.email ?? null;
+  const replyBoxRegistered = enabled.some(
+    (b) => b.email.toLowerCase() === replyTo.toLowerCase());
+
+  const budget = from ? await pacing.budget("email", from) : null;
+
+  let note: string;
+  if (!from) note = "메일함을 등록해야 발송됩니다 (설정)";
+  else if (!configured) note = "서비스 계정 키 없음 · 전부 dry-run";
+  else if (!replyBoxRegistered) note = `회신 주소 ${replyTo} 미등록 — 회신을 읽지 못합니다`;
+  else note = `Gmail API 연동 · 인박스 ${enabled.length}개 수집`;
+
+  return {
+    from, replyTo, replyBoxRegistered, inboxCount: enabled.length,
+    ok: Boolean(from) && configured && replyBoxRegistered,
+    note, budget,
+  };
 }

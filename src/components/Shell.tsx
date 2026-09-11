@@ -1,7 +1,7 @@
 import Link from "next/link";
 import type { ReactNode } from "react";
 import { navGroups } from "@/lib/nav";
-import { one } from "@/lib/db";
+import { sendingIdentity } from "@/lib/queries";
 import { krDate, today } from "@/lib/clock";
 import FeedbackWidget from "./FeedbackWidget";
 
@@ -17,14 +17,10 @@ export default async function Shell({
   sub?: string;
   children: ReactNode;
 }) {
-  const [groups, sender] = await Promise.all([
-    navGroups(),
-    one<{ identifier: string; sent_today: number; current_cap: number }>(
-      `SELECT identifier, sent_today, current_cap FROM sender
-        WHERE channel='email' AND is_active AND (paused_until IS NULL OR paused_until < now())
-        ORDER BY identifier LIMIT 1`,
-    ),
-  ]);
+  // 여기 뜨는 주소는 "지금 메일이 나가고 회신이 들어오는 곳" 이어야 한다.
+  // 전에는 sender 표에서 identifier 순으로 아무거나 하나 집었다 — 시드로 들어온
+  // 주소가 떴고, 등록한 메일함과 아무 상관이 없었다.
+  const [groups, id] = await Promise.all([navGroups(), sendingIdentity()]);
 
   return (
     <div className="app">
@@ -52,10 +48,10 @@ export default async function Shell({
           ))}
         </nav>
         <div className="sidefoot">
-          <span className="dot" />
-          {sender?.identifier ?? "partner@dinostudio.kr"}
+          <span className={`dot${id.ok ? "" : " off"}`} />
+          {id.from ?? "메일함 미등록"}
           <br />
-          <span style={{ color: "var(--ink-3)", fontSize: 11 }}>Gmail API 연동 · dry-run</span>
+          <span style={{ color: "var(--ink-3)", fontSize: 11 }}>{id.note}</span>
         </div>
       </aside>
 
@@ -65,9 +61,10 @@ export default async function Shell({
           <span className="sub">{sub || krDate(today())}</span>
           <span className="spacer" />
           <span className="demo">샘플 데이터</span>
-          {sender && (
+          {id.budget && (
             <span className="senderchip">
-              <i /> 오늘 발송 {sender.sent_today} / {sender.current_cap}
+              <i /> 오늘 발송 {id.budget.sentToday} / {id.budget.capToday}
+              {!id.budget.enforced && " (권장)"}
             </span>
           )}
         </div>

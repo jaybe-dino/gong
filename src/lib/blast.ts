@@ -9,7 +9,7 @@ import { hasColumn, hasTable } from "./schema";
 import * as track from "./tracking";
 import * as pace from "./pacing";
 import { render, type PolicyRow } from "./template";
-import { channelPolicies } from "./queries";
+import { channelPolicies, sendingIdentity } from "./queries";
 
 /**
  * 발송 (blast) — 채널 하나, 대상 한 묶음, 문안 하나.
@@ -758,6 +758,17 @@ export async function preflight(blastId: string): Promise<Preflight> {
     if (!isSaConfigured()) {
       warnings.push("서비스 계정 키가 없어 전부 dry-run 으로 처리됩니다 — 실제로 나가지 않습니다.");
     }
+    // 회신 주소의 메일함이 등록돼 있지 않으면 회신이 아무 데도 도착하지 않는다.
+    // 발송 자체는 되므로 막지 않되, 조용히 지나가면 며칠 뒤에야 "회신이 하나도
+    // 없다" 로 발견한다.
+    const idn = await sendingIdentity();
+    if (!idn.replyBoxRegistered) {
+      warnings.push(
+        `회신 주소 ${idn.replyTo} 가 등록된 메일함에 없습니다 — 답장이 와도 통합 인박스에 ` +
+        `들어오지 않습니다. 설정 → 메일함에 그 주소를 등록하거나, 발신 주소를 등록된 ` +
+        `메일함으로 바꾸세요.`);
+    }
+
     if (from) {
       budget = await pace.budget(b.channel, from, await settings.fromName());
       // 권장 상한은 blocker 가 아니다. 적용을 켜 두었더라도 "오늘 몫을 다 썼다" 는
